@@ -1,0 +1,20 @@
+name: windows-check
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["fsd/**", "tests/**", ".github/workflows/windows-check.yml"]
+jobs:
+  ontop:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install numpy opencv-python pygame-ce requests mss pytest
+      - run: python -m pytest -q tests
+      - run: python tests/win_ontop_check.py
+      - if: always()
+        run: if (Test-Path data/logs/errors.log) { Get-Content data/logs/errors.log }
