@@ -200,7 +200,12 @@ class Dashboard:
                 self._move_window(cx - self._drag[0], cy - self._drag[1])
             self._set_visible(self.app.ui_visible)
             self._keep_on_top()
-            self.draw(dt)
+            try:
+                self.draw(dt)
+            except Exception:  # noqa: BLE001 - a drawing glitch must never close the app
+                from ..app import log_error
+                log_error("dashboard draw")
+                self.screen.fill(BG)
             pygame.display.flip()
             dt = self.clock.tick(60) / 1000.0
         self.app.shutdown()

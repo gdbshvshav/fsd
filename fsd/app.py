@@ -13,9 +13,11 @@ Threads:
 from __future__ import annotations
 
 import argparse
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -34,6 +36,19 @@ from .settings import Settings
 from .ui.draw_debug import annotate
 from .winput import VK, Actuator, InputMonitor, roblox_focused
 from .world import Mode, Plan, World
+
+LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "logs"
+
+
+def log_error(where: str) -> str:
+    """Append the current exception to data/logs/errors.log; returns a one-line summary."""
+    import traceback
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    tb = traceback.format_exc()
+    with open(LOG_DIR / "errors.log", "a", encoding="utf-8") as f:
+        f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {where} ===\n{tb}")
+    last = tb.strip().splitlines()[-1] if tb.strip() else "unknown error"
+    return last[:120]
 
 
 @dataclass
@@ -212,6 +227,21 @@ class App:
         }
 
     def control_loop(self) -> None:
+        """Never dies: if anything inside errors, log it, let go of the keys and carry on."""
+        fails = 0
+        while not self._stop.is_set():
+            try:
+                self._control_loop_inner()
+            except Exception:  # noqa: BLE001
+                fails += 1
+                err = log_error("control loop")
+                self.actuator.release_all()
+                self.learner.say(f"recovered from an error ({err}) - see data/logs/errors.log")
+                if self.engaged and fails >= 3:
+                    self.disengage("errors")
+                time.sleep(0.2)
+
+    def _control_loop_inner(self) -> None:
         last_seq = -1
         last_t = time.perf_counter()
         last_dbg = 0.0
@@ -334,7 +364,12 @@ def main() -> None:
             app.shutdown()
         return
     from .ui.dashboard import Dashboard
-    Dashboard(app, app.settings.ui_monitor, app.settings.ui_overlay).run()
+    try:
+        Dashboard(app, app.settings.ui_monitor, app.settings.ui_overlay).run()
+    except Exception:  # noqa: BLE001
+        print("FSD crashed:", log_error("dashboard"))
+        app.shutdown()
+        sys.exit(3)          # start.bat sees this and restarts the app
 
 
 if __name__ == "__main__":

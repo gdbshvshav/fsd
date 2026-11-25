@@ -45,15 +45,19 @@ class Capture:
             self._seq += 1
 
     def _run(self) -> None:
-        try:
-            self._run_dxcam()
-            return
-        except Exception as e:  # noqa: BLE001 - fall back on any dxcam problem
-            self.error = f"dxcam unavailable ({e}); using mss"
-        try:
-            self._run_mss()
-        except Exception as e:  # noqa: BLE001
-            self.error = f"capture failed: {e}"
+        """Keeps capturing no matter what: Roblox going fullscreen, alt-tab, display
+        changes. If one method breaks it switches to the other and keeps retrying."""
+        use_dx = True
+        while not self._stop.is_set():
+            try:
+                if use_dx:
+                    self._run_dxcam()
+                else:
+                    self._run_mss()
+            except Exception as e:  # noqa: BLE001
+                self.error = f"{'dxcam' if use_dx else 'mss'} stopped ({e}); retrying"
+                use_dx = not use_dx
+                time.sleep(0.5)
 
     def _run_dxcam(self) -> None:
         import dxcam  # type: ignore

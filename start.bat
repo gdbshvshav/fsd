@@ -45,5 +45,17 @@ if not "%REQHASH%"=="%OLDHASH%" (
 
 if not exist .env if exist .env.example copy .env.example .env >nul
 shift
+rem ===== Run. Only closing the FSD window ends it; a crash restarts it. =====
+set RESTARTS=0
+:run
 python -m fsd %1 %2 %3 %4 %5
-if errorlevel 1 pause
+if %errorlevel%==0 exit /b 0
+set /a RESTARTS+=1
+if %RESTARTS% geq 5 (
+  echo FSD crashed 5 times in a row. Send Claude the file data\logs\errors.log
+  pause
+  exit /b 1
+)
+echo FSD crashed - restarting in 3 seconds. Details: data\logs\errors.log
+timeout /t 3 >nul
+goto run
