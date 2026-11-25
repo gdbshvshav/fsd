@@ -21,6 +21,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ..notify import GREEN, ORANGE, PURPLE, RED, discord
 from ..params import SPEC, ParamStore, clamp_changes, describe_spec
 from .ai import CAMERA_PROMPT, Gemini, Groq
 from .recorder import load_scenario, update_meta
@@ -93,8 +94,10 @@ class Learner:
         self._stop.set()
 
     def say(self, text: str) -> None:
-        self.log.append(f"{time.strftime('%H:%M:%S')} {text}")
+        line = f"{time.strftime('%H:%M:%S')} {text}"
+        self.log.append(line)
         print("[learn]", text)
+        discord().log(line)
 
     # ---- requests from the app ----
     def diagnose(self, scenario: Path, note: str) -> None:
@@ -160,6 +163,11 @@ class Learner:
     def _diagnose(self, d: Path, note: str, deferred: list) -> None:
         if not self.gemini.ok:
             self.say(f"saved {d.name}. Add GEMINI_API_KEY for automatic diagnosis.")
+            frames, _, meta = load_scenario(d)
+            t_dis = meta.get("disengage_t", 0)
+            near = [f for t, f in frames if t <= t_dis][-3:]
+            discord().embed(f"Disengage saved: {d.name}", "No Gemini key, so no automatic review.", ORANGE,
+                            [("Your note", note or "(none)", False)], files=near)
             return
         self.busy = "Gemini reviewing the disengage..."
         frames, rows, meta = load_scenario(d)
@@ -188,6 +196,7 @@ class Learner:
                                     t_dis=t_dis, telemetry="\n".join(json.dumps(x) for x in tel), times=times)
         res = self.gemini.ask(prompt, [i for i in imgs if i is not None], timeout=90)
         update_meta(d, diagnosis=res)
+        self._post_review(d, note, res, pick, tel, t_dis)
         self.say(f"Gemini: {res.get('what_happened', '?')} | cause: {res.get('likely_cause', '?')}")
         if res.get("advice_for_driver"):
             self.say(f"tip: {res['advice_for_driver']}")
@@ -196,6 +205,31 @@ class Learner:
             self.say("No parameter fix proposed (probably perception) - try Training mode (F2) on this spot.")
             return
         self.q.put(("validate", fix, d, "gemini", f"disengage {d.name}: {res.get('likely_cause', '')[:80]}"))
+
+    def _post_review(self, d: Path, note: str, res: dict, pick: list, tel: list, t_dis: float) -> None:
+        """Send Gemini's review to Discord with the exact frames it looked at."""
+        cur = self.store.snapshot()
+        fix = clamp_changes(res.get("fix") or {})
+        fix_txt = "\n".join(f"`{k}`: {cur[k]:.3g} -> {v:.3g}" for k, v in fix.items()) or \
+            "No setting change (perception problem or nothing to tune)"
+        key = [int(i) for i in (res.get("key_frames") or []) if isinstance(i, (int, float)) and 0 <= i < len(pick)]
+        order = key + [i for i in range(len(pick)) if i not in key]
+        files = [pick[i][1] for i in order][:10]
+        times = ", ".join(f"{pick[i][0] - t_dis:+.1f}s" for i in order[:10])
+        tail = [r for r in tel if r.get("t", 0) <= t_dis][-4:]
+        tel_txt = "\n".join(f"{r.get('t', 0) - t_dis:+.1f}s {r.get('mode')} {r.get('speed')}kph -> "
+                            f"{r.get('target')} | {r.get('reason')} | light {r.get('light')}" for r in tail)
+        discord().embed(
+            f"Disengage review: {res.get('category', '?')}  ({d.name})",
+            f"**What happened:** {res.get('what_happened', '?')}\n**Likely cause:** {res.get('likely_cause', '?')}",
+            PURPLE,
+            [("Your note", note or "(none)", False),
+             ("Confidence", f"{float(res.get('confidence', 0) or 0):.0%}", True),
+             ("Frames reviewed", f"{len(pick)} (key frames first): {times}", True),
+             ("Proposed fix (being tested on saved drives)", fix_txt, False),
+             ("Last seconds before takeover", f"```{tel_txt[:950]}```" if tel_txt else "-", False),
+             ("Tip", res.get("advice_for_driver", "") or "-", False)],
+            files=files, footer="Images: the frames Gemini looked at, key frames first")
 
     def _tune(self, stats: dict, deferred: list) -> None:
         cur = self.store.snapshot()
@@ -215,13 +249,22 @@ class Learner:
         from .replay import standard_suite, validate
         self.busy = "Testing a fix on saved drives..."
         suite = standard_suite()
-        ok, report = validate(self._replay(), self.store.snapshot(), changes, target, suite)
+        before = self.store.snapshot()
+        ok, report = validate(self._replay(), before, changes, target, suite)
+        diff = "\n".join(f"`{k}`: {before[k]:.3g} -> {v:.3g}" for k, v in changes.items())
+        who = {"gemini": "Gemini (from a disengage)", "groq": "Groq (tuning)"}.get(source, source)
         if ok:
             v = self.store.apply(changes, note, source)
+            discord().embed(f"Setting change APPLIED (now v{v})", note, GREEN,
+                            [("Changed", diff, False), ("Suggested by", who, True),
+                             ("Undo", "Press F6 in FSD", True), ("Replay test", report[-1000:], False)])
             self.say(f"Applied {changes} as v{v} (rollback: F6). {report.splitlines()[-1]}")
             if target is not None:
                 update_meta(target, fix_applied=v)
         else:
+            discord().embed("Setting change REJECTED (nothing changed)", note, RED,
+                            [("Tried", diff, False), ("Suggested by", who, True),
+                             ("Why rejected", report[-1000:], False)])
             self.say(f"Rejected {changes}: {report.splitlines()[-1]}")
             if target is not None:
                 update_meta(target, fix_rejected={"changes": changes, "report": report})

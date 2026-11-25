@@ -16,6 +16,9 @@ import time
 import numpy as np
 
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+# SDL minimizes its window when another app (Roblox) takes focus; never do that.
+os.environ["SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS"] = "0"
+os.environ.setdefault("SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0")
 import pygame  # noqa: E402
 
 from ..world import Light, Mode  # noqa: E402
@@ -122,6 +125,10 @@ class Dashboard:
         try:
             self.hwnd = pygame.display.get_wm_info()["window"]
             self.on_top = on_top
+            # tool window: no taskbar button, can't be minimized by "show desktop"/alt-tab shuffles
+            GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST = -20, 0x00000080, 0x00000008
+            ex = u.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
+            u.SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | (WS_EX_TOPMOST if on_top else 0))
             if opacity < 0.999:
                 GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA = -20, 0x00080000, 0x2
                 ex = u.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
@@ -137,11 +144,13 @@ class Dashboard:
         if u is None or self.hwnd is None or not getattr(self, "on_top", False):
             return
         now = time.time()
-        if not force and now - self._last_top < 2.0:
+        if not force and now - self._last_top < 0.5:
             return
         self._last_top = now
-        HWND_TOPMOST, NOSIZE, NOMOVE, NOACTIVATE = -1, 0x0001, 0x0002, 0x0010
-        u.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, NOSIZE | NOMOVE | NOACTIVATE)
+        if self._visible and u.IsIconic(self.hwnd):
+            u.ShowWindow(self.hwnd, 4)                   # got minimized: bring it back without taking focus
+        HWND_TOPMOST, NOSIZE, NOMOVE, NOACTIVATE, SHOWWINDOW = -1, 0x0001, 0x0002, 0x0010, 0x0040
+        u.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW)
 
     def _move_window(self, x: int, y: int) -> None:
         u = self._user32()

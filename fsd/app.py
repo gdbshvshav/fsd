@@ -27,6 +27,7 @@ from .control.camera_aim import CameraAim
 from .control.controllers import LateralController, SpeedController
 from .learning.learner import Learner
 from .learning.recorder import Recorder, TrainingRecorder
+from .notify import BLUE, GREY, ORANGE, discord
 from .params import ParamStore
 from .perception import Perception
 from .perception.calibrate import apply as apply_calibration
@@ -48,6 +49,11 @@ def log_error(where: str) -> str:
     with open(LOG_DIR / "errors.log", "a", encoding="utf-8") as f:
         f.write(f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} {where} ===\n{tb}")
     last = tb.strip().splitlines()[-1] if tb.strip() else "unknown error"
+    try:
+        from .notify import RED, discord
+        discord().embed(f"Error in {where}", f"```{tb[-1800:]}```", RED)
+    except Exception:  # noqa: BLE001
+        pass
     return last[:120]
 
 
@@ -119,6 +125,10 @@ class App:
         self.engaged = True
         self.actuator.set_enabled(not self.dry_run)
         self.learner.say("FSD engaged" + (" (dry run: no keys pressed)" if self.dry_run else ""))
+        w = self._snap.world
+        discord().embed("FSD engaged", "", BLUE, [
+            ("Speed", f"{w.speed_kph:.0f} kph" if w else "-", True),
+            ("Params", f"v{self.store.version}", True), ("Vehicle", self.store.vehicle, True)])
 
     def disengage(self, why: str) -> None:
         if not self.engaged:
@@ -127,6 +137,11 @@ class App:
         self.actuator.set_enabled(False)
         speed = self._snap.world.speed_kph if self._snap.world else 0.0
         self.learner.say(f"Disengaged ({why})")
+        plan = self._snap.plan
+        discord().embed(f"Disengaged: {why}", "Saving the last 30 s for review." if (why == "takeover" or speed > 5)
+                        else "", ORANGE if why != "F1" else GREY, [
+            ("Speed", f"{speed:.0f} kph", True),
+            ("Was doing", f"{plan.mode.value}: {plan.reason}" if plan else "-", True)])
         if why == "takeover" or speed > 5:
             self.recorder.trigger(time.perf_counter(), why, {"params_version": self.store.version,
                                                               "vehicle": self.store.vehicle})
@@ -159,6 +174,7 @@ class App:
     def rollback(self) -> None:
         v = self.store.rollback()
         self.learner.say(f"Rolled back to params v{v}")
+        discord().embed(f"Settings rolled back to v{v}", "You pressed F6.", ORANGE)
 
     def open_prompt(self) -> None:
         if self.pending_scenario is not None:
@@ -333,8 +349,16 @@ class App:
         if getattr(self.capture, "error", ""):
             self.learner.say(self.capture.error)
         threading.Thread(target=self.control_loop, name="control", daemon=True).start()
+        st = self.perception.status()
+        discord().embed("FSD started", "", GREY, [
+            ("Vision", st.get("detector", "?"), True), ("Params", f"v{self.store.version}", True),
+            ("Gemini", "on" if self.learner.gemini.ok else "off", True),
+            ("Groq", "on" if self.learner.groq.ok else "off", True),
+            ("Mode", "dry run" if self.dry_run else "live", True)])
 
     def shutdown(self) -> None:
+        discord().embed("FSD closed", "", GREY)
+        discord().stop()
         self.engaged = False
         self.actuator.stop()
         self._stop.set()
