@@ -57,10 +57,10 @@ def _human_cmd(rows: list[dict], t: float, win: float = 0.3) -> tuple[float, flo
 
 class Replayer:
     def __init__(self, settings: Settings | None = None, use_detector: bool = True):
-        from ..perception import Perception
+        from ..fast.pipeline import FastPerception
         self.settings = settings or Settings.load()
         self.use_detector = use_detector
-        self.perception = Perception(self.settings, use_detector=use_detector, use_ocr=False)
+        self.perception = FastPerception(self.settings, use_detector=use_detector, use_ocr=False, live=False)
         self.cache: dict[tuple, list] = {}
 
     def _worlds(self, d: Path, p: dict):
@@ -71,6 +71,7 @@ class Replayer:
         per = self.perception
         per.geo = None                                    # fresh trackers per scenario
         per.tracker = type(per.tracker)()
+        per.ego_shape = type(per.ego_shape)()
         worlds = []
         for t, f in frames:
             img = cv2.imread(str(f))

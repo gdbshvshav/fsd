@@ -338,7 +338,6 @@ class Dashboard:
         if w is not None and geo is not None:
             pw, ph = self.app.proc_size
             sx, sy = Wv / pw, Hv / ph
-            S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], np.float64)
 
             def to_view(pts_vehicle):
                 p = geo.vehicle_to_screen(np.asarray(pts_vehicle, np.float32))
@@ -363,29 +362,24 @@ class Dashboard:
                 if len(pts) > 1:
                     cv2.polylines(out, [pts], False, (255, 150, 50), max(3, Hv // 140), cv2.LINE_AA)
 
-            # lane paint: the real paint pixels, but only along the lines FSD is using
-            dbg = per.lanes.debug
-            if dbg.paint_all is not None:
-                M = S @ geo.Minv
-                paint = cv2.warpPerspective(dbg.paint_all, M, (Wv, Hv), flags=cv2.INTER_NEAREST)
-                near = np.zeros_like(mask)
-                ln = w.lanes
-                for side in ("left", "right", "left2", "right2"):
-                    line = getattr(ln, side)
-                    if line is None:
-                        continue
-                    xs = np.linspace(1.5, min(58.0, max(8.0, line.x_max)), 40)
-                    pts = to_view(np.stack([xs, [line.y_at(x) for x in xs]], 1))
+            # lane paint: the real paint pixels, only along the lines FSD found
+            res = getattr(per, "last_screen", None)
+            if res is not None and res.masks is not None:
+                near = np.zeros((ph, pw), np.uint8)
+                for pts, ego, yel in res.chains_screen:
                     if len(pts) > 1:
-                        cv2.polylines(near, [pts], False, 255, max(6, Hv // 45))
-                # stop bars and crosswalks across our lane
+                        order = np.argsort(pts[:, 1])
+                        cv2.polylines(near, [pts[order].reshape(-1, 1, 2)], False, 255, max(5, ph // 70))
+                ln = w.lanes
                 c = ln.center[2] if ln.conf > 0 else 0.0
                 for d in (w.stop_line_dist, w.crosswalk_dist):
                     if d < 60:
-                        band = to_view([[d - 1.2, c - 6], [d - 1.2, c + 6], [d + 3.5, c + 6], [d + 3.5, c - 6]])
-                        if len(band) == 4:
-                            cv2.fillPoly(near, [band], 255)
-                mask |= cv2.dilate(paint & near, np.ones((3, 3), np.uint8))
+                        band = geo.vehicle_to_screen(np.array([[d - 1.2, c - 6], [d - 1.2, c + 6],
+                                                               [d + 3.5, c + 6], [d + 3.5, c - 6]], np.float32))
+                        cv2.fillPoly(near, [band.astype(np.int32)], 255)
+                paint = (res.masks.paint | res.masks.wide) & near
+                paint = cv2.dilate(paint, np.ones((2, 2), np.uint8))
+                mask |= cv2.resize(paint, (Wv, Hv), interpolation=cv2.INTER_NEAREST)
 
             # your car + everything detected: boxes cut out in real colour
             def cut(box, shrink=0.04):
@@ -472,8 +466,9 @@ class Dashboard:
         foot.fill((10, 11, 14, 170))
         self.screen.blit(foot, (0, Hv - foot.get_height()))
         self._text(self.f_small, msg[:90], WHITE, (10, Hv - 2 * self.line_h - 4))
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view   brain {st.get('fps', 0):.0f}/s · "
-                f"vision {st.get('det_fps', 0):.0f}/s {st.get('det_ms', 0):.0f}ms · {st.get('device', '')} · "
+        extra = f" · YOLO {st.get('det_fps', 0):.0f}/s" if st.get("device", "").startswith("GPU") else ""
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view   {st.get('fps', 0):.0f} fps "
+                f"({st.get('vision_ms', 0):.0f} ms) · lights {st.get('lights_fps', 0):.0f}/s{extra} · "
                 f"v{st.get('params', 0)}")
         if st.get("warn"):
             keys = st["warn"] + " · " + keys

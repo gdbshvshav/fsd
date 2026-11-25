@@ -29,7 +29,8 @@ from .learning.learner import Learner
 from .learning.recorder import Recorder, TrainingRecorder
 from .notify import BLUE, GREY, ORANGE, discord
 from .params import ParamStore
-from .perception import Perception
+from .fast.pipeline import FastPerception
+from .fast.scaler import FramePair
 from .perception.calibrate import apply as apply_calibration
 from .perception.calibrate import auto_calibrate
 from .planning.planner import Planner
@@ -75,7 +76,9 @@ class App:
         self.store.vehicle = self.settings.vehicle
         self.dry_run = dry_run
         self.capture = FileSource(source) if source else Capture(self.settings.monitor, self.settings.capture_fps)
-        self.perception = Perception(self.settings, on_calibrated=self.settings.save)
+        # 60 fps, no-GPU-needed vision; YOLO only adds extra detail when a GPU is there
+        self.perception = FastPerception(self.settings, on_calibrated=self.settings.save,
+                                         use_detector=self._want_yolo())
         self.planner = Planner()
         self.lat = LateralController()
         self.lon = SpeedController()
@@ -103,6 +106,7 @@ class App:
         self.paused_reason = ""
         self._last_tune = time.perf_counter()
         self._force_camera = False
+        self._camera_until = 0.0
         handlers = {
             VK[self.settings.engage_key]: self.toggle_engage,
             VK[self.settings.turn_left_key]: lambda: self.turn("left"),
@@ -167,7 +171,7 @@ class App:
 
     def aim_camera(self) -> None:
         self._force_camera = True
-        self.learner.say("Re-aiming camera")
+        self.learner.say("Lining up the camera once (F3). It won't move again by itself.")
 
     def start_calibration(self) -> None:
         self.calib_frames = []
@@ -227,17 +231,21 @@ class App:
                 frame[b:d, a:c] = 0
         return frame
 
-    def prep(self, frame: np.ndarray) -> np.ndarray:
-        frame = self.crop_game(frame)
-        H, W = frame.shape[:2]
-        if W > self.MAX_W:                       # 4K: work at 1920 wide
-            if W >= 2 * self.MAX_W - 64:
-                frame = frame[::2, ::2]          # exact half: much faster than resizing
-                H, W = frame.shape[:2]
-            if W > self.MAX_W:
-                frame = cv2.resize(frame, (self.MAX_W, int(H * self.MAX_W / W)), interpolation=cv2.INTER_LINEAR)
-        self.proc_size = (frame.shape[1], frame.shape[0])
-        return frame
+    def prep(self, frame: np.ndarray) -> FramePair:
+        """Roblox area only, our window blacked out, then a ~960 px work picture
+        (lanes, obstacles, car outline) and a ~1920 px one (lamps, speedometer)."""
+        pair = FramePair(self.crop_game(frame), work_w=960, fine_w=1920)
+        self.proc_size = (pair.work.shape[1], pair.work.shape[0])
+        return pair
+
+    @staticmethod
+    def _want_yolo() -> bool:
+        """YOLO only when a CUDA GPU is usable; on a CPU it would just steal time."""
+        try:
+            import torch
+            return bool(torch.cuda.is_available())
+        except Exception:  # noqa: BLE001
+            return False
 
     def view_frame(self, width: int, height: int) -> np.ndarray | None:
         """Newest game picture sized for the dashboard (called 60x a second by the UI)."""
@@ -326,13 +334,14 @@ class App:
                 time.sleep(0.002)
                 continue
             last_seq = seq
-            frame = self.prep(frame)
+            pair = self.prep(frame)
+            frame = pair.work
             now = time.perf_counter()
             dt = min(0.2, now - last_t)
             last_t = now
             p = self.store.snapshot()
 
-            w = self.perception.process(frame, p, t=now)
+            w = self.perception.process(frame, p, t=now, fine=pair.fine)
             self.actuator.speed_kph = w.speed_kph
 
             # pause (don't steer) if Roblox lost focus, so keys never go to another app
@@ -358,13 +367,13 @@ class App:
             if self.paused_reason:
                 plan.alert = self.paused_reason
 
-            # camera
-            self.camera.update(w, p, active, frame.shape[1], frame.shape[0], force=self._force_camera)
-            if self._force_camera:
-                self.learner.camera_check(frame)
+            # camera: NEVER moved automatically. Only when you press F3 it lines the
+            # camera up once (a short burst of small nudges for ~1.5 s), then leaves it alone.
+            if self._camera_until > now:
+                self.camera.update(w, p, True, frame.shape[1], frame.shape[0], force=True)
+            elif self._force_camera:
                 self._force_camera = False
-            elif active:
-                self.learner.camera_check(frame)
+                self._camera_until = now + 1.5
 
             # calibration capture
             if self.calib_frames is not None:
@@ -397,6 +406,9 @@ class App:
             st = self.perception.status()
             if self.actuator.stale and self.engaged:
                 st["warn"] = "keys released: commands too slow"
+            for m in self.perception.messages:
+                self.learner.say(m)
+            self.perception.messages.clear()
             st.update({"fps": self.fps, "params": self.store.version, "log": list(self.learner.log)})
             if self.learner.busy:
                 st["log"] = st["log"] + [self.learner.busy]
@@ -414,9 +426,9 @@ class App:
         threading.Thread(target=self.control_loop, name="control", daemon=True).start()
         st = self.perception.status()
         ocr = self.perception.ocr.engine.kind if self.perception.ocr else ""
-        if st.get("device", "").startswith("CPU"):
-            self.learner.say("WARNING: PyTorch can't see your NVIDIA GPU - update your NVIDIA driver. "
-                             "Using the CPU (slower, smaller model).")
+        self.learner.say("Vision: lanes, lights, stop signs, obstacles and your car outline run without AI "
+                         "or GPU." + (" YOLO adds extra detail on your GPU." if st.get("device", "").startswith("GPU")
+                                      else ""))
         discord().embed("FSD started", "", GREY, [
             ("Vision", st.get("detector", "?"), True), ("Runs on", st.get("device", "?"), True),
             ("Speed reader", ocr or "none", True), ("Params", f"v{self.store.version}", True),
