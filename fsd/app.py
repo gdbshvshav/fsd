@@ -70,6 +70,7 @@ class App:
         self._stop = threading.Event()
         self.prompt_open = False
         self.prompt_since = 0.0
+        self.ui_visible = True
         self.pending_scenario = None
         self.calib_frames: list[np.ndarray] | None = None
         self.fps = 0.0
@@ -85,6 +86,7 @@ class App:
             VK["F4"]: self.start_calibration,
             VK["F6"]: self.rollback,
             VK["F7"]: self.open_prompt,
+            VK["F9"]: self.toggle_ui,
         }
         self.inputs = InputMonitor(handlers, self._driver_key)
 
@@ -135,6 +137,9 @@ class App:
     def start_calibration(self) -> None:
         self.calib_frames = []
         self.learner.say("Calibrating: hold a straight line in the middle of your lane...")
+
+    def toggle_ui(self) -> None:
+        self.ui_visible = not self.ui_visible
 
     def rollback(self) -> None:
         v = self.store.rollback()

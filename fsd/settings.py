@@ -67,8 +67,12 @@ class Settings:
     record_key: str = "F2"          # training recorder on/off
     camera_key: str = "F3"          # re-aim camera now
     vehicle: str = "default"
-    ui_monitor: int = 1             # dashboard on 2nd monitor if present, else windowed
-    ui_overlay: bool = False        # True = small always-on-top window over the game
+    ui_monitor: int = 1             # dashboard fills this monitor if you have 2 screens
+    ui_overlay: bool = False        # True = always use the small floating window, even with 2 screens
+    ui_on_top: bool = True          # stay above Roblox
+    ui_opacity: float = 0.92        # floating window see-through amount (0.3 - 1.0)
+    ui_size: list = field(default_factory=lambda: [640, 360])   # floating window size (px)
+    ui_pos: list | None = None      # floating window position; None = top-right corner
     model_path: str = "models/erlc.pt"   # trained ER:LC model (made by training mode)
     fallback_model: str = "yolo11s.pt"   # COCO model: cars, people, lights, stop signs
     device: str = "auto"            # "auto" | "cuda" | "cpu"

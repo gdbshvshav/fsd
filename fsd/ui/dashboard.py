@@ -59,28 +59,38 @@ class Dashboard:
 
     def __init__(self, app, monitor: int = 1, overlay: bool = False):
         self.app = app
+        st = app.settings
         pygame.init()
         pygame.display.set_caption("ER:LC FSD")
-        flags = 0
         try:
             sizes = pygame.display.get_desktop_sizes()
         except Exception:  # noqa: BLE001
             sizes = [(1920, 1080)]
-        if overlay:
-            self.W, self.H = 720, 405
-        if monitor < len(sizes) and monitor > 0 and not overlay:
-            os.environ["SDL_VIDEO_WINDOW_POS"] = f"{sum(s[0] for s in sizes[:monitor])},0"
+        # Two screens: fill the second one. One screen: small floating window
+        # in the top-right corner that stays above Roblox (drag it to move).
+        self.compact = overlay or not (0 < monitor < len(sizes))
+        if self.compact:
+            self.W, self.H = int(st.ui_size[0]), int(st.ui_size[1])
+            x, y = st.ui_pos or (sizes[0][0] - self.W - 16, 64)
+        else:
             self.W, self.H = sizes[monitor]
-            flags = pygame.NOFRAME
-        self.screen = pygame.display.set_mode((self.W, self.H), flags | pygame.RESIZABLE)
-        if overlay:
-            self._always_on_top()
+            x, y = sum(s[0] for s in sizes[:monitor]), 0
+        os.environ["SDL_VIDEO_WINDOW_POS"] = f"{x},{y}"
+        self.win_pos = [int(x), int(y)]
+        self.screen = pygame.display.set_mode((self.W, self.H), pygame.NOFRAME)
+        self.hwnd = None
+        self._drag: tuple[int, int] | None = None
+        self._visible = True
+        self._last_top = 0.0
+        self._win_setup(st.ui_on_top, st.ui_opacity if self.compact else 1.0)
         self.clock = pygame.time.Clock()
         name = "segoeui" if os.name == "nt" else None
-        self.f_huge = pygame.font.SysFont(name, int(self.H * 0.15), bold=True)
-        self.f_big = pygame.font.SysFont(name, int(self.H * 0.05), bold=True)
-        self.f_med = pygame.font.SysFont(name, int(self.H * 0.032))
-        self.f_small = pygame.font.SysFont(name, int(self.H * 0.024))
+        # readable minimum sizes for the small floating window
+        self.f_huge = pygame.font.SysFont(name, max(56, int(self.H * 0.15)), bold=True)
+        self.f_big = pygame.font.SysFont(name, max(20, int(self.H * 0.05)), bold=True)
+        self.f_med = pygame.font.SysFont(name, max(16, int(self.H * 0.032)))
+        self.f_small = pygame.font.SysFont(name, max(13, int(self.H * 0.024)))
+        self.line_h = self.f_small.get_linesize()
         self.road = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
         # smoothed road model
         self.e_left = Ease([0, 0, -1.85], 6)
@@ -95,18 +105,67 @@ class Dashboard:
         self.typing = False
         self.preview_cache: tuple[str | None, list] = (None, [])
         self.blink = 0.0
-        self.show_camera = True
+        self.show_camera = not self.compact
         self._resize_at = 0.0
 
-    def _always_on_top(self) -> None:
+    # ---------------- window management (Windows) ----------------
+    def _user32(self):
         if os.name != "nt":
+            return None
+        import ctypes
+        return ctypes.windll.user32
+
+    def _win_setup(self, on_top: bool, opacity: float) -> None:
+        u = self._user32()
+        if u is None:
             return
         try:
-            import ctypes
-            hwnd = pygame.display.get_wm_info()["window"]
-            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002)
+            self.hwnd = pygame.display.get_wm_info()["window"]
+            self.on_top = on_top
+            if opacity < 0.999:
+                GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA = -20, 0x00080000, 0x2
+                ex = u.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
+                u.SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+                u.SetLayeredWindowAttributes(self.hwnd, 0, int(255 * max(0.3, min(1.0, opacity))), LWA_ALPHA)
+            self._keep_on_top(force=True)
         except Exception:  # noqa: BLE001
-            pass
+            self.hwnd = None
+
+    def _keep_on_top(self, force: bool = False) -> None:
+        """Re-assert 'topmost' every couple of seconds; never steals focus from Roblox."""
+        u = self._user32()
+        if u is None or self.hwnd is None or not getattr(self, "on_top", False):
+            return
+        now = time.time()
+        if not force and now - self._last_top < 2.0:
+            return
+        self._last_top = now
+        HWND_TOPMOST, NOSIZE, NOMOVE, NOACTIVATE = -1, 0x0001, 0x0002, 0x0010
+        u.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, NOSIZE | NOMOVE | NOACTIVATE)
+
+    def _move_window(self, x: int, y: int) -> None:
+        u = self._user32()
+        if u is None or self.hwnd is None:
+            return
+        HWND_TOPMOST, NOSIZE, NOACTIVATE = -1, 0x0001, 0x0010
+        u.SetWindowPos(self.hwnd, HWND_TOPMOST, int(x), int(y), 0, 0, NOSIZE | NOACTIVATE)
+        self.win_pos = [int(x), int(y)]
+
+    def _cursor(self) -> tuple[int, int]:
+        import ctypes
+        from ctypes import wintypes
+        pt = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+        return pt.x, pt.y
+
+    def _set_visible(self, show: bool) -> None:
+        u = self._user32()
+        if u is None or self.hwnd is None or show == self._visible:
+            return
+        self._visible = show
+        u.ShowWindow(self.hwnd, 4 if show else 0)       # SW_SHOWNOACTIVATE / SW_HIDE
+        if show:
+            self._keep_on_top(force=True)
 
     # ---------------- projection: vehicle metres -> dashboard pixels ----------------
     CAM_BACK, CAM_H = 13.0, 5.5
@@ -127,16 +186,20 @@ class Dashboard:
             for ev in pygame.event.get():
                 if ev.type == pygame.QUIT:
                     running = False
-                elif ev.type == pygame.VIDEORESIZE:
-                    self._resize_at = time.time() + 0.25         # handle once, after resizing stops
-                    self._pending_size = (ev.w, ev.h)
                 elif ev.type == pygame.KEYDOWN:
                     running = self._key(ev) and running
-            if self._resize_at and time.time() > self._resize_at:
-                self._resize_at = 0.0
-                self.W, self.H = self._pending_size
-                self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
-                self.road = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+                elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1 and self.compact and self.hwnd:
+                    cx, cy = self._cursor()
+                    self._drag = (cx - self.win_pos[0], cy - self.win_pos[1])
+                elif ev.type == pygame.MOUSEBUTTONUP and ev.button == 1 and self._drag:
+                    self._drag = None
+                    self.app.settings.ui_pos = list(self.win_pos)     # remember where you put it
+                    self.app.settings.save()
+            if self._drag:
+                cx, cy = self._cursor()
+                self._move_window(cx - self._drag[0], cy - self._drag[1])
+            self._set_visible(self.app.ui_visible)
+            self._keep_on_top()
             self.draw(dt)
             pygame.display.flip()
             dt = self.clock.tick(60) / 1000.0
@@ -166,7 +229,7 @@ class Dashboard:
     def draw(self, dt: float) -> None:
         snap = self.app.snapshot()
         w, plan = snap.world, snap.plan
-        self.road_w = int(self.W * 0.64)
+        self.road_w = int(self.W * (0.55 if self.compact else 0.64))
         self.screen.fill(BG)
         self.road.fill((0, 0, 0, 0))
         now = time.time()
@@ -338,10 +401,11 @@ class Dashboard:
 
     def _draw_panel(self, snap, w, plan) -> None:
         x0 = self.road_w + int(self.W * 0.02)
+        maxc = 34 if self.compact else 70
         y = int(self.H * 0.04)
         engaged = snap.engaged
         # status pill
-        pill = pygame.Rect(x0, y, int(self.W * 0.32), int(self.H * 0.07))
+        pill = pygame.Rect(x0, y, self.W - x0 - int(self.W * 0.02), max(26, int(self.H * 0.07)))
         mode = plan.mode if plan else Mode.OFF
         pcol = BLUE if engaged else (60, 64, 74)
         if mode == Mode.FAULT:
@@ -371,8 +435,8 @@ class Dashboard:
         y = r.bottom + int(self.H * 0.01)
         if plan is not None and engaged:
             tgt = plan.target_speed_kph / 1.609344 if unit == "mph" else plan.target_speed_kph
-            self._text(self.f_small, f"set {tgt:.0f}  ·  {plan.reason}", DIM, (x0, y))
-        y += int(self.H * 0.05)
+            self._text(self.f_small, f"set {tgt:.0f} · {plan.reason}"[:maxc], DIM, (x0, y))
+        y += self.line_h + 6
 
         # turn signals
         if plan is not None:
@@ -383,8 +447,8 @@ class Dashboard:
             pygame.draw.polygon(self.screen, lc, [(x0, y + s), (x0 + s, y), (x0 + s, y + 2 * s)])
             pygame.draw.polygon(self.screen, rc, [(x0 + 4 * s, y), (x0 + 5 * s, y + s), (x0 + 4 * s, y + 2 * s)])
             if plan.alert:
-                self._text(self.f_small, plan.alert[:60], WHITE, (x0 + 6 * s, y + s), "midleft")
-            y += 3 * s
+                self._text(self.f_small, plan.alert[:maxc - 6], WHITE, (x0 + 6 * s, y + s), "midleft")
+            y += 2 * s + 8
 
         # traffic light
         if w is not None and w.signal.state != Light.NONE:
@@ -401,19 +465,25 @@ class Dashboard:
             y += 36
 
         # learning log + status
-        y = int(self.H * 0.40) + (int(self.W * 0.30 * 9 / 16) + int(self.H * 0.03) if self.show_camera else 0)
+        if not self.compact:
+            y = int(self.H * 0.40) + (int(self.W * 0.30 * 9 / 16) + int(self.H * 0.03) if self.show_camera else 0)
         st = snap.status
         if snap.training_on:
             self._text(self.f_small, f"● TRAINING RECORDER ON ({snap.training_count} frames)", RED, (x0, y))
             y += int(self.H * 0.035)
+        bottom = self.H - 2 * self.line_h - 8
         for line in list(st.get("log", []))[-6:]:
-            self._text(self.f_small, line[:70], DIM, (x0, y))
-            y += int(self.H * 0.03)
+            if y + self.line_h > bottom:
+                break
+            self._text(self.f_small, line[9:][:maxc] if self.compact else line[:maxc], DIM, (x0, y))
+            y += self.line_h
         foot = (f"{st.get('fps', 0):.0f} fps · {st.get('detector', '')} · params v{st.get('params', 0)} · "
                 f"{st.get('ocr', '')}")
-        self._text(self.f_small, foot[:90], (90, 94, 104), (int(self.W * 0.01), self.H - int(self.H * 0.04)))
-        keys = "F1 FSD · Q/E turn · F2 train rec · F3 camera · F4 calibrate · F6 undo fix · F7 note · C cam view"
-        self._text(self.f_small, keys, (90, 94, 104), (int(self.W * 0.01), self.H - int(self.H * 0.075)))
+        self._text(self.f_small, foot[:(60 if self.compact else 90)], (90, 94, 104),
+                   (int(self.W * 0.01), self.H - self.line_h - 2))
+        keys = ("F1 FSD · Q/E turn · F9 hide/show this · drag to move" if self.compact else
+                "F1 FSD · Q/E turn · F2 train rec · F3 camera · F4 calibrate · F6 undo fix · F7 note · F9 hide · C cam")
+        self._text(self.f_small, keys, (90, 94, 104), (int(self.W * 0.01), self.H - 2 * self.line_h - 4))
 
     def _draw_camera(self, img) -> None:
         h, w = img.shape[:2]
