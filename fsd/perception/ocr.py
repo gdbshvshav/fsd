@@ -20,26 +20,44 @@ KPH_PER_MPH = 1.609344
 
 
 class OcrEngine:
+    """RapidOCR (fast, ONNX). Falls back to EasyOCR (uses PyTorch) if RapidOCR
+    can't be installed, e.g. on a brand-new Python version."""
+
     def __init__(self):
         self.ok = False
         self.error = ""
+        self.kind = ""
         try:
             from rapidocr_onnxruntime import RapidOCR  # type: ignore
             self.eng = RapidOCR()
-            self.ok = True
+            self.ok, self.kind = True, "rapid"
+            return
         except Exception as e:  # noqa: BLE001
             self.error = f"OCR unavailable: {e}"
+        try:
+            import easyocr  # type: ignore
+            import torch
+            self.eng = easyocr.Reader(["en"], gpu=torch.cuda.is_available(), verbose=False)
+            self.ok, self.kind, self.error = True, "easy", ""
+        except Exception as e:  # noqa: BLE001
+            self.error += f"; EasyOCR unavailable: {e}"
+
+    def _run(self, img: np.ndarray) -> list:
+        if self.kind == "rapid":
+            res, _ = self.eng(img)
+            return res or []
+        return [(box, text, score) for box, text, score in self.eng.readtext(img)]
 
     def read(self, img: np.ndarray) -> list[tuple[str, tuple[int, int, int, int], float]]:
         """[(text, (x1,y1,x2,y2), score)]"""
         if not self.ok or img is None or img.size == 0:
             return []
         try:
-            res, _ = self.eng(img)
+            res = self._run(img)
         except Exception:  # noqa: BLE001
             return []
         out = []
-        for box, text, score in res or []:
+        for box, text, score in res:
             xs = [p[0] for p in box]
             ys = [p[1] for p in box]
             out.append((str(text), (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))), float(score)))
