@@ -20,6 +20,11 @@ for %%V in (3.12 3.11 3.13) do (
   )
 )
 if not defined PY (
+  echo Installing Python 3.12 for you ^(one time^)...
+  winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements >nul 2>nul
+  py -3.12 -c "import sys" >nul 2>nul && set PY=py -3.12
+)
+if not defined PY (
   python -c "import sys" >nul 2>nul && set PY=python
 )
 if not defined PY (
@@ -29,10 +34,6 @@ if not defined PY (
 )
 for /f "delims=" %%v in ('%PY% -c "import sys; print('%%d.%%d' %% sys.version_info[:2])"') do set PYVER=%%v
 echo Using Python %PYVER%
-if "%PYVER%"=="3.14" (
-  echo NOTE: Python 3.14 is very new and some parts may not install. If you see errors,
-  echo install Python 3.12 from python.org, then run setup.bat again ^(it switches automatically^).
-)
 
 rem ---- recreate .venv if it was made with a different Python ----
 if exist .venv\Scripts\python.exe (
@@ -78,7 +79,7 @@ echo.
 python -c "import torch; print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none found - update your NVIDIA driver, using CPU for now')"
 python -m pytest -q tests
 echo.
-echo Done. Next:
-echo   1. Open .env in Notepad and paste your Gemini and Groq keys (NOT .env.example)
-echo   2. Run start.bat
+echo Setup finished.
+if "%~1"=="--from-start" exit /b 0
+echo Next: run start.bat
 pause
