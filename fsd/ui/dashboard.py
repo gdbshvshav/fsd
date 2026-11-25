@@ -395,7 +395,10 @@ class Dashboard:
                 c2, d2 = int((x2 - dx) * sx), int((y2 - dy) * sy)
                 if c2 > a and d2 > b:
                     cv2.rectangle(mask, (a, b), (c2, d2), 255, -1)
-            cut(per.ego_box, 0.0)
+            if per.ego_shape.mask is not None:
+                per.ego_shape.paste(mask, sx, sy)      # exact outline of YOUR car
+            else:
+                cut(per.ego_box, 0.0)
             for o in w.objects:
                 if o.kind == "light" and o.extra.get("state") not in ("red", "yellow", "green"):
                     continue

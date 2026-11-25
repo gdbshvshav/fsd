@@ -10,6 +10,7 @@ import numpy as np
 from ..settings import Settings
 from ..world import Light, Obj, World
 from .detector import AsyncDetector, Detector
+from .ego_shape import EgoShape
 from .geometry import Geometry
 from .lanes import LaneFinder
 from .lights import SignalTracker, find_light_candidates
@@ -40,6 +41,7 @@ class Perception:
         self._det_objs: list[Obj] = []
         self._last_sign_submit = 0.0
         self.ego_box: tuple[int, int, int, int] = (0, 0, 0, 0)
+        self.ego_shape = EgoShape()
         self.frame_id = 0
         self.last_objects: list[Obj] = []
 
@@ -51,6 +53,23 @@ class Perception:
         self.motion = EgoMotion(self.geo.focal_px)
         x1, y1, x2, y2 = self.cal.ego_mask
         self.ego_box = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
+
+    def _update_ego(self, frame, t) -> None:
+        """Exact outline of our car (no AI), and let the ego box follow that outline."""
+        self.ego_shape.update(frame, self.ego_box, t)
+        bb = self.ego_shape.bbox
+        if bb is None:
+            return
+        H, W = frame.shape[:2]
+        x1, y1, x2, y2 = bb
+        cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+        sane = 0.3 * W < cx < 0.7 * W and 0.3 * H < cy < 0.9 * H and 0.03 * W < bw < 0.35 * W and 0.03 * H < bh < 0.5 * H
+        if not sane:
+            return
+        m = 0.06
+        target = (x1 - m * bw, y1 - m * bh, x2 + m * bw, y2 + m * bh)
+        a = 0.3
+        self.ego_box = tuple(int((1 - a) * e + a * tv) for e, tv in zip(self.ego_box, target))
 
     def _is_ego(self, box) -> bool:
         """Our own car: the vehicle sitting in the middle of the chase camera.
@@ -102,6 +121,7 @@ class Perception:
         w.stop_line_dist = stop_line if stop_line is not None else 999.0
         w.crosswalk_dist = crosswalk if crosswalk is not None else 999.0
         tm["lanes"] = time.perf_counter() - t0
+        self._update_ego(frame, t)
 
         # ---- objects ----
         t0 = time.perf_counter()

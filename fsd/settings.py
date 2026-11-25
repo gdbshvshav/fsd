@@ -54,7 +54,7 @@ class Calibration:
     # Part of the screen covered by YOUR car (x1, y1, x2, y2 fractions). In ER:LC's chase
     # camera the car sits in the middle of the screen, not at the bottom. Detections there
     # are ignored, and the box follows your car automatically while driving.
-    ego_mask: list = field(default_factory=lambda: [0.455, 0.47, 0.545, 0.615])
+    ego_mask: list = field(default_factory=lambda: [0.445, 0.47, 0.555, 0.66])
     # Speedometer region (fractions x1,y1,x2,y2). None = auto-find on first drive.
     speedo_roi: list | None = None
     speed_unit: str = "auto"   # "auto" | "kph" | "mph"
