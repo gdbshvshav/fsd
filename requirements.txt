@@ -1,10 +1,10 @@
 # torch is installed by setup.bat with CUDA (GPU) support first.
+# The speedometer reader (rapidocr / easyocr) is also installed by setup.bat.
 numpy>=1.26
 opencv-python>=4.9
 pygame-ce>=2.5  # same 'import pygame', has wheels for new Python versions
 requests>=2.31
 dxcam>=0.0.5 ; sys_platform == "win32"
 mss>=9.0
-rapidocr-onnxruntime>=1.3
 ultralytics>=8.3
 pytest>=8.0
