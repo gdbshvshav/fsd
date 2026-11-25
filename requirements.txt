@@ -1,0 +1,10 @@
+# torch is installed by setup.bat with CUDA (GPU) support first.
+numpy>=1.26
+opencv-python>=4.9
+pygame>=2.5
+requests>=2.31
+dxcam>=0.0.5 ; sys_platform == "win32"
+mss>=9.0
+rapidocr-onnxruntime>=1.3
+ultralytics>=8.3
+pytest>=8.0

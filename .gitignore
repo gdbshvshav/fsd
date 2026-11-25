@@ -1,0 +1,13 @@
+# secrets
+.env
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# big / personal data (recordings, training frames, params history, weights)
+data/
+models/*.pt
+!models/.gitkeep
+runs/
+*.log
