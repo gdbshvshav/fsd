@@ -92,6 +92,7 @@ class App:
         self.prompt_open = False
         self.prompt_since = 0.0
         self.ui_visible = True
+        self.want_debug_img = False
         self.pending_scenario = None
         self.calib_frames: list[np.ndarray] | None = None
         self.fps = 0.0
@@ -229,8 +230,12 @@ class App:
     def prep(self, frame: np.ndarray) -> np.ndarray:
         frame = self.crop_game(frame)
         H, W = frame.shape[:2]
-        if W > self.MAX_W:                       # 4K: work at 1920 wide (lights are read before this matters)
-            frame = cv2.resize(frame, (self.MAX_W, int(H * self.MAX_W / W)), interpolation=cv2.INTER_AREA)
+        if W > self.MAX_W:                       # 4K: work at 1920 wide
+            if W >= 2 * self.MAX_W - 64:
+                frame = frame[::2, ::2]          # exact half: much faster than resizing
+                H, W = frame.shape[:2]
+            if W > self.MAX_W:
+                frame = cv2.resize(frame, (self.MAX_W, int(H * self.MAX_W / W)), interpolation=cv2.INTER_LINEAR)
         self.proc_size = (frame.shape[1], frame.shape[0])
         return frame
 
@@ -240,6 +245,9 @@ class App:
         if frame is None:
             return None
         frame = self.crop_game(frame)
+        k = max(1, int(frame.shape[1] / width / 1.5))
+        if k > 1:
+            frame = frame[::k, ::k]              # cheap pre-shrink for 4K
         return cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
 
     # ------------------------------------------------------------------ control loop
@@ -337,6 +345,9 @@ class App:
             self.paused_reason = "" if focused or not self.engaged else "Paused: Roblox isn't the active window"
 
             plan = self.planner.step(w, p, active, now)
+            if active and self.fps and self.fps < 8 and plan.target_speed_kph > 30:
+                plan.target_speed_kph = 30.0         # PC can't keep up: drive slowly
+                plan.alert = f"Slow: only {self.fps:.0f} checks/s - capped at 30 km/h"
             steer = pedal = 0.0
             if active:
                 steer = self.lat.step(w, plan, p, dt)
@@ -373,8 +384,8 @@ class App:
                 if stats:
                     self.learner.tune(stats)
 
-            # debug picture for the dashboard (~7 Hz)
-            if now - last_dbg > 0.14:
+            # debug picture only for the old map view's camera thumbnail
+            if self.want_debug_img and now - last_dbg > 0.25:
                 last_dbg = now
                 small = annotate(frame, w, self.perception, plan)
                 dbg = cv2.resize(small, (640, int(small.shape[0] * 640 / small.shape[1])), interpolation=cv2.INTER_AREA)
@@ -384,6 +395,8 @@ class App:
                 self.fps = frames_n / (now - fps_t)
                 frames_n, fps_t = 0, now
             st = self.perception.status()
+            if self.actuator.stale and self.engaged:
+                st["warn"] = "keys released: commands too slow"
             st.update({"fps": self.fps, "params": self.store.version, "log": list(self.learner.log)})
             if self.learner.busy:
                 st["log"] = st["log"] + [self.learner.busy]
@@ -400,8 +413,13 @@ class App:
             self.learner.say(self.capture.error)
         threading.Thread(target=self.control_loop, name="control", daemon=True).start()
         st = self.perception.status()
+        ocr = self.perception.ocr.engine.kind if self.perception.ocr else ""
+        if st.get("device", "").startswith("CPU"):
+            self.learner.say("WARNING: PyTorch can't see your NVIDIA GPU - update your NVIDIA driver. "
+                             "Using the CPU (slower, smaller model).")
         discord().embed("FSD started", "", GREY, [
-            ("Vision", st.get("detector", "?"), True), ("Params", f"v{self.store.version}", True),
+            ("Vision", st.get("detector", "?"), True), ("Runs on", st.get("device", "?"), True),
+            ("Speed reader", ocr or "none", True), ("Params", f"v{self.store.version}", True),
             ("Gemini", "on" if self.learner.gemini.ok else "off", True),
             ("Groq", "on" if self.learner.groq.ok else "off", True),
             ("Mode", "dry run" if self.dry_run else "live", True)])

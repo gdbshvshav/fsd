@@ -30,6 +30,7 @@ class LaneDebug:
     bev: np.ndarray | None = None
     mask: np.ndarray | None = None
     candidates: list | None = None
+    paint_all: np.ndarray | None = None     # every bit of road paint (incl. crosswalks / stop bars)
 
 
 def _fit(xs: np.ndarray, ys: np.ndarray, w: np.ndarray | None = None) -> tuple[np.ndarray, float]:
@@ -339,7 +340,7 @@ class LaneFinder:
         self.prev_left, self.prev_right, self.prev_t = sl, sr, t
 
         lanes = self._assemble(sl, sr, left2, right2, lane_width)
-        self.debug = LaneDebug(bev, pl, cands)
+        self.debug = LaneDebug(bev, pl, cands, wa | ph | pl)
         return lanes, stop_line, crosswalk
 
     @staticmethod

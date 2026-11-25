@@ -9,7 +9,7 @@ import numpy as np
 
 from ..settings import Settings
 from ..world import Light, Obj, World
-from .detector import Detector
+from .detector import AsyncDetector, Detector
 from .geometry import Geometry
 from .lanes import LaneFinder
 from .lights import SignalTracker, find_light_candidates
@@ -34,6 +34,10 @@ class Perception:
         self.detector = Detector(ROOT, settings.model_path, settings.fallback_model, settings.device) \
             if use_detector else None
         self.ocr = OcrWorker(self.cal, on_calibrated).start() if use_ocr else None
+        # live use: detection on its own thread; replays/tests: inline (deterministic)
+        self.async_det = AsyncDetector(self.detector) if (use_ocr and self.detector and self.detector.ok) else None
+        self._det_seq = 0
+        self._det_objs: list[Obj] = []
         self._last_sign_submit = 0.0
         self.ego_box: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.frame_id = 0
@@ -68,7 +72,14 @@ class Perception:
         return True
 
     def status(self) -> dict:
+        d = self.detector
+        dev = ""
+        if d is not None and d.ok:
+            dev = f"GPU {d.gpu_name}" if d.gpu_name else "CPU (no GPU found!)"
         return {
+            "device": dev,
+            "det_ms": self.async_det.ms if self.async_det else 0.0,
+            "det_fps": self.async_det.fps if self.async_det else 0.0,
             "detector": ("custom ER:LC model" if self.detector and self.detector.custom else
                          "COCO model" if self.detector and self.detector.ok else
                          (self.detector.error if self.detector else "off")),
@@ -95,8 +106,19 @@ class Perception:
         # ---- objects ----
         t0 = time.perf_counter()
         objs: list[Obj] = []
-        if self.detector is not None and self.detector.ok:
-            objs = self.detector.detect(frame, min(p["light_min_score"], p["object_min_score"]))
+        det_frame = frame
+        fresh = True
+        min_score = min(p["light_min_score"], p["object_min_score"])
+        if self.async_det is not None:
+            self.async_det.submit(frame, min_score)
+            res, rframe, rt, seq = self.async_det.latest()
+            fresh = seq != self._det_seq
+            self._det_seq = seq
+            if rframe is not None and rframe.shape == frame.shape and t - rt < 0.6:
+                objs = [Obj(o.kind, o.box, o.score, extra=dict(o.extra)) for o in res]
+                det_frame = rframe
+        elif self.detector is not None and self.detector.ok:
+            objs = self.detector.detect(frame, min_score)
         else:
             objs = find_light_candidates(frame, geo.horizon_y) + find_stop_signs(frame, geo.horizon_y)
         tm["detect"] = time.perf_counter() - t0
@@ -126,9 +148,14 @@ class Perception:
                 ob.x, ob.y = sign_position(geo, ob.box, STOP_SIGN_H_M, self.cal.cam_to_bumper_m)
             others.append(ob)
 
-        others = self.tracker.update(others, t)
+        if fresh:
+            others = self.tracker.update(others, t)
+            self._det_objs = others
+        else:
+            others = self._det_objs                  # same detections as last frame: keep tracks as they are
         lane_cy = lanes.center[2] if lanes.conf > 0 else 0.0
-        w.signal = self.signals.update(frame, lights, lane_cy, p["flash_window_s"], t)
+        w.signal = self.signals.update(det_frame, lights, lane_cy, p["flash_window_s"], t) if fresh \
+            else self.signals.last_info
         w.objects = others + lights
 
         # ---- stop signs that face us, on our side ----
@@ -186,6 +213,8 @@ class Perception:
     def close(self) -> None:
         if self.ocr:
             self.ocr.stop()
+        if self.async_det:
+            self.async_det.stop()
 
 
 __all__ = ["Perception", "Light"]

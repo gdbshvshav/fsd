@@ -152,7 +152,7 @@ class OcrWorker:
             for crop in signs:
                 self._read_sign(crop)
             dt = time.perf_counter() - t0
-            time.sleep(max(0.0, 0.14 - dt))
+            time.sleep(max(0.0, 0.08 - dt))     # speed read ~10x a second
 
     def _read_speed(self, frame: np.ndarray) -> None:
         H, W = frame.shape[:2]

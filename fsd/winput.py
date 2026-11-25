@@ -293,6 +293,9 @@ class Actuator:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.pressed_log: list[str] = []  # for the recorder: keys held this tick
+        self.last_cmd = 0.0
+        self.max_age = 0.3                # no fresh command for this long -> release W/A/S/D
+        self.stale = False
         atexit.register(self.release_all)
 
     def start(self) -> "Actuator":
@@ -305,12 +308,14 @@ class Actuator:
 
     def command(self, steer: float, pedal: float) -> None:
         with self._lock:
+            self.last_cmd = time.perf_counter()
             self.steer = max(-1.0, min(1.0, steer))
             self.pedal = max(-1.0, min(1.0, pedal))
 
     def set_enabled(self, on: bool) -> None:
         with self._lock:
             self.enabled = on
+            self.last_cmd = time.perf_counter()
             if not on:
                 self.steer = self.pedal = 0.0
                 self._acc_s = self._acc_p = 0.0
@@ -346,8 +351,15 @@ class Actuator:
         with self._lock:
             if not self.enabled:
                 return 0, 0
-            self._acc_s, s = self._sd(self._acc_s, self.steer)
-            pedal = self.pedal
+            # Safety: if the brain stops sending commands (slow PC, hiccup), never
+            # keep holding throttle or steering - coast until fresh commands arrive.
+            self.stale = time.perf_counter() - self.last_cmd > self.max_age
+            if self.stale:
+                self._acc_s = self._acc_p = 0.0
+                s_cmd, pedal = 0.0, 0.0
+            else:
+                s_cmd, pedal = self.steer, self.pedal
+            self._acc_s, s = self._sd(self._acc_s, s_cmd)
             # never press S at a standstill (that would reverse) unless allowed
             if pedal < 0 and self.speed_kph < 1.5 and not self.allow_reverse:
                 pedal = 0.0

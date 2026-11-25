@@ -264,6 +264,7 @@ class Dashboard:
             self.show_camera = not self.show_camera
         if ev.key == pygame.K_v:
             self.view = "3d" if self.view == "camera" else "camera"
+            self.app.want_debug_img = self.view == "3d"
         if ev.key == pygame.K_ESCAPE and (ev.mod & pygame.KMOD_SHIFT):
             return False
         return True
@@ -319,6 +320,9 @@ class Dashboard:
 
     # ================= camera view: your game, greyed, with highlights =================
     def _draw_camera_view(self, snap, w, plan) -> None:
+        """Your game in grey; everything FSD detects shown in its REAL colours,
+        cut out like a green screen and following it: your car, lane lines,
+        stop lines / crosswalks, other cars, people, cones, lights and signs."""
         import cv2
         Wv, Hv = self.W, self.H
         img = self.app.view_frame(Wv, Hv)
@@ -327,90 +331,85 @@ class Dashboard:
             self._text(self.f_med, "Waiting for the game screen...", DIM, (Wv // 2, Hv // 2), "center")
             return
         g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        base = cv2.cvtColor((g.astype(np.float32) * 0.42 + 18).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-        over = base.copy()
+        out = cv2.cvtColor((g.astype(np.float32) * 0.38 + 14).astype(np.uint8), cv2.COLOR_GRAY2BGR)
         per = self.app.perception
         geo = per.geo
+        mask = np.zeros((Hv, Wv), np.uint8)
         if w is not None and geo is not None:
             pw, ph = self.app.proc_size
             sx, sy = Wv / pw, Hv / ph
+            S = np.array([[sx, 0, 0], [0, sy, 0], [0, 0, 1]], np.float64)
 
-            def S(pts):
-                pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
-                return np.stack([pts[:, 0] * sx, pts[:, 1] * sy], 1).astype(np.int32)
+            def to_view(pts_vehicle):
+                p = geo.vehicle_to_screen(np.asarray(pts_vehicle, np.float32))
+                keep = (p[:, 1] > geo.horizon_y + 1) & (p[:, 1] < ph)
+                p = p[keep]
+                return np.stack([p[:, 0] * sx, p[:, 1] * sy], 1).astype(np.int32)
 
-            def curve(coeffs, x0, x1, dy=0.0):
-                xs = np.linspace(x0, x1, 28)
-                a, b, c = coeffs
-                p = geo.vehicle_to_screen(np.stack([xs, a * xs * xs + b * xs + c + dy], 1))
-                keep = (p[:, 1] > geo.horizon_y + 2) & (p[:, 1] < ph)
-                return S(p[keep])
-
-            ln = w.lanes
-            # planned path: blue ribbon on the road
+            # planned path: a faint blue carpet on the grey road
             if plan is not None and plan.path and plan.mode.value != "off":
                 xs = np.array([q[0] for q in plan.path])
                 ys = np.array([q[1] for q in plan.path])
-                keep = xs >= 1.0
-                if keep.sum() > 2:
-                    L = geo.vehicle_to_screen(np.stack([xs[keep], ys[keep] - 0.9], 1))
-                    R = geo.vehicle_to_screen(np.stack([xs[keep], ys[keep] + 0.9], 1))
-                    poly = np.vstack([S(L), S(R)[::-1]])
-                    cv2.fillPoly(over, [poly], (255, 140, 40))
-            # turn preview
-            if plan is not None and plan.turn_preview:
-                p = geo.vehicle_to_screen(np.array(plan.turn_preview, dtype=np.float32))
-                keep = (p[:, 1] > geo.horizon_y + 2) & (p[:, 1] < ph)
-                pts = S(p[keep])
-                if len(pts) > 1 and (self.blink < 0.6):
-                    cv2.polylines(base, [pts], False, (255, 160, 60), max(3, Hv // 120), cv2.LINE_AA)
-            cv2.addWeighted(over, 0.35, base, 0.65, 0, base)
-            # lane lines
-            th = max(2, Hv // 220)
-            for side in ("left", "right", "left2", "right2"):
-                line = getattr(ln, side)
-                if line is None:
-                    continue
-                col = (40, 200, 255) if line.color == "yellow" else (255, 255, 255)
-                if side.endswith("2"):
-                    col = tuple(int(c * 0.55) for c in col)
-                pts = curve(line.coeffs, 2.0, min(55.0, max(8.0, line.x_max)))
+                k = xs >= 1.0
+                if k.sum() > 2:
+                    L = to_view(np.stack([xs[k], ys[k] - 0.9], 1))
+                    R = to_view(np.stack([xs[k], ys[k] + 0.9], 1))
+                    if len(L) > 1 and len(R) > 1:
+                        tint = out.copy()
+                        cv2.fillPoly(tint, [np.vstack([L, R[::-1]])], (255, 120, 30))
+                        cv2.addWeighted(tint, 0.30, out, 0.70, 0, out)
+            if plan is not None and plan.turn_preview and self.blink < 0.6:
+                pts = to_view(np.array(plan.turn_preview, np.float32))
                 if len(pts) > 1:
-                    cv2.polylines(base, [pts], False, col, th + (1 if not side.endswith("2") else 0), cv2.LINE_AA)
-            # stop line / crosswalk
-            for d, col, label in ((w.stop_line_dist, (60, 60, 255), "STOP"),
-                                  (plan.stop_at if plan is not None and plan.stop_at is not None else 999,
-                                   (60, 60, 255), "STOP"),
-                                  (w.crosswalk_dist, (0, 190, 255), "CROSSWALK")):
-                if d < 80:
-                    c = ln.center[2] if ln.conf > 0 else 0.0
-                    p = S(geo.vehicle_to_screen(np.array([[d, c - 1.9], [d, c + 1.9]])))
-                    cv2.line(base, tuple(p[0]), tuple(p[1]), col, th * 3, cv2.LINE_AA)
-                    cv2.putText(base, label, (int(p[1][0]) + 6, int(p[1][1])), 0, 0.45, col, 1, cv2.LINE_AA)
-            # objects
-            lead_id = plan.lead.track_id if plan is not None and plan.lead is not None else None
+                    cv2.polylines(out, [pts], False, (255, 150, 50), max(3, Hv // 140), cv2.LINE_AA)
+
+            # lane paint: the real paint pixels, but only along the lines FSD is using
+            dbg = per.lanes.debug
+            if dbg.paint_all is not None:
+                M = S @ geo.Minv
+                paint = cv2.warpPerspective(dbg.paint_all, M, (Wv, Hv), flags=cv2.INTER_NEAREST)
+                near = np.zeros_like(mask)
+                ln = w.lanes
+                for side in ("left", "right", "left2", "right2"):
+                    line = getattr(ln, side)
+                    if line is None:
+                        continue
+                    xs = np.linspace(1.5, min(58.0, max(8.0, line.x_max)), 40)
+                    pts = to_view(np.stack([xs, [line.y_at(x) for x in xs]], 1))
+                    if len(pts) > 1:
+                        cv2.polylines(near, [pts], False, 255, max(6, Hv // 45))
+                # stop bars and crosswalks across our lane
+                c = ln.center[2] if ln.conf > 0 else 0.0
+                for d in (w.stop_line_dist, w.crosswalk_dist):
+                    if d < 60:
+                        band = to_view([[d - 1.2, c - 6], [d - 1.2, c + 6], [d + 3.5, c + 6], [d + 3.5, c - 6]])
+                        if len(band) == 4:
+                            cv2.fillPoly(near, [band], 255)
+                mask |= cv2.dilate(paint & near, np.ones((3, 3), np.uint8))
+
+            # your car + everything detected: boxes cut out in real colour
+            def cut(box, shrink=0.04):
+                x1, y1, x2, y2 = box
+                dx, dy = (x2 - x1) * shrink, (y2 - y1) * shrink
+                a, b = int((x1 + dx) * sx), int((y1 + dy) * sy)
+                c2, d2 = int((x2 - dx) * sx), int((y2 - dy) * sy)
+                if c2 > a and d2 > b:
+                    cv2.rectangle(mask, (a, b), (c2, d2), 255, -1)
+            cut(per.ego_box, 0.0)
             for o in w.objects:
-                x1, y1, x2, y2 = [int(v * (sx if i % 2 == 0 else sy)) for i, v in enumerate(o.box)]
-                if o.kind == "light":
-                    st = o.extra.get("state", "off")
-                    col = {"red": (60, 60, 255), "yellow": (0, 210, 255), "green": (90, 230, 90)}.get(st)
-                    if col is None:
-                        continue                       # backs / unlit heads: don't clutter
-                    cv2.rectangle(base, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), col, 2, cv2.LINE_AA)
-                    cv2.circle(base, ((x1 + x2) // 2, y1 - 10), 6, col, -1, cv2.LINE_AA)
+                if o.kind == "light" and o.extra.get("state") not in ("red", "yellow", "green"):
                     continue
-                col = {"car": (255, 200, 120), "person": (60, 170, 255), "cone": (0, 140, 255),
-                       "stop_sign": (60, 60, 255), "speed_sign": (240, 240, 240), "emergency": (255, 80, 255)}.get(
-                    o.kind, (200, 200, 200))
-                if o.track_id == lead_id and lead_id is not None:
-                    col = (255, 130, 40)
-                    sub = base[max(0, y1):y2, max(0, x1):x2]
-                    if sub.size:
-                        sub[:] = (sub * 0.6 + np.array(col) * 0.4).astype(np.uint8)
-                cv2.rectangle(base, (x1, y1), (x2, y2), col, 2, cv2.LINE_AA)
-                label = o.kind if o.kind != "car" else f"{o.x:.0f} m"
-                cv2.putText(base, label, (x1, max(12, y1 - 4)), 0, 0.42, col, 1, cv2.LINE_AA)
-        surf = pygame.image.frombuffer(base[:, :, ::-1].tobytes(), (Wv, Hv), "RGB")
+                cut(o.box, 0.0 if o.kind == "light" else 0.04)
+        out[mask > 0] = img[mask > 0]
+        # lead car + stop point: small labels only
+        if w is not None and geo is not None and plan is not None:
+            pw, ph = self.app.proc_size
+            sx, sy = Wv / pw, Hv / ph
+            if plan.lead is not None:
+                x1, y1, x2, y2 = plan.lead.box
+                cv2.putText(out, f"{plan.lead.x:.0f} m", (int(x1 * sx), max(12, int(y1 * sy) - 5)), 0, 0.5,
+                            (255, 170, 60), 1, cv2.LINE_AA)
+        surf = pygame.image.frombuffer(out[:, :, ::-1].tobytes(), (Wv, Hv), "RGB")
         self.screen.blit(surf, (0, 0))
         self._draw_hud(snap, w, plan)
 
@@ -470,7 +469,11 @@ class Dashboard:
         foot.fill((10, 11, 14, 170))
         self.screen.blit(foot, (0, Hv - foot.get_height()))
         self._text(self.f_small, msg[:90], WHITE, (10, Hv - 2 * self.line_h - 4))
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · drag to move   {st.get('fps', 0):.0f} fps · params v{st.get('params', 0)}")
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view   brain {st.get('fps', 0):.0f}/s · "
+                f"vision {st.get('det_fps', 0):.0f}/s {st.get('det_ms', 0):.0f}ms · {st.get('device', '')} · "
+                f"v{st.get('params', 0)}")
+        if st.get("warn"):
+            keys = st["warn"] + " · " + keys
         self._text(self.f_small, keys[:110], (140, 144, 154), (10, Hv - self.line_h - 2))
         if snap.training_on:
             self._text(self.f_small, f"● REC {snap.training_count}", RED, (Wv - 10, bar_h + 6), "topright")

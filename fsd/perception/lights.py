@@ -128,6 +128,7 @@ class SignalTracker:
         self.last_state = Light.NONE
         self.last_dist = 999.0
         self.last_seen = 0.0
+        self.last_info = SignalInfo()
 
     def light_position(self, box) -> tuple[float, float]:
         x1, y1, x2, y2 = box
@@ -196,4 +197,5 @@ class SignalTracker:
                 info.distance = self.last_dist
                 info.conf = max(info.conf, 0.6)
         self.last_state = info.state
+        self.last_info = info
         return info

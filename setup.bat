@@ -65,7 +65,7 @@ python -m pip install "numpy>=1.26" "opencv-python>=4.9" "pygame-ce>=2.5" "reque
 
 echo.
 echo [3/4] Text reader for the speedometer and speed signs...
-python -m pip install "rapidocr-onnxruntime>=1.3" || (
+python -m pip install rapidocr-onnxruntime onnxruntime || (
   echo RapidOCR isn't available for this Python, using EasyOCR instead...
   python -m pip install easyocr || (echo OCR install failed. Send a screenshot. & pause & exit /b 1)
 )
