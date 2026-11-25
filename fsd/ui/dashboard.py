@@ -44,6 +44,11 @@ MODE_TEXT = {
 }
 
 
+def wintypes_hwnd(v: int):
+    import ctypes
+    return ctypes.c_void_p(v)
+
+
 class Ease:
     """Critically damped smoothing for display values."""
 
@@ -112,11 +117,29 @@ class Dashboard:
         self._resize_at = 0.0
 
     # ---------------- window management (Windows) ----------------
+    _u32 = None
+
     def _user32(self):
+        """user32 with proper 64-bit argument types (without them, HWND_TOPMOST=-1
+        gets truncated on 64-bit Windows and 'always on top' silently does nothing)."""
         if os.name != "nt":
             return None
-        import ctypes
-        return ctypes.windll.user32
+        if Dashboard._u32 is None:
+            import ctypes
+            from ctypes import wintypes
+            u = ctypes.WinDLL("user32", use_last_error=True)
+            u.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            u.SetWindowPos.restype = wintypes.BOOL
+            u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            u.GetWindowLongW.restype = ctypes.c_long
+            u.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+            u.SetWindowLongW.restype = ctypes.c_long
+            u.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_ubyte, wintypes.DWORD]
+            u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            u.IsIconic.argtypes = [wintypes.HWND]
+            Dashboard._u32 = u
+        return Dashboard._u32
 
     def _win_setup(self, on_top: bool, opacity: float) -> None:
         u = self._user32()
@@ -126,9 +149,9 @@ class Dashboard:
             self.hwnd = pygame.display.get_wm_info()["window"]
             self.on_top = on_top
             # tool window: no taskbar button, can't be minimized by "show desktop"/alt-tab shuffles
-            GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST = -20, 0x00000080, 0x00000008
+            GWL_EXSTYLE, WS_EX_TOOLWINDOW = -20, 0x00000080
             ex = u.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
-            u.SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | (WS_EX_TOPMOST if on_top else 0))
+            u.SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW)
             if opacity < 0.999:
                 GWL_EXSTYLE, WS_EX_LAYERED, LWA_ALPHA = -20, 0x00080000, 0x2
                 ex = u.GetWindowLongW(self.hwnd, GWL_EXSTYLE)
@@ -149,14 +172,14 @@ class Dashboard:
         self._last_top = now
         if self._visible and u.IsIconic(self.hwnd):
             u.ShowWindow(self.hwnd, 4)                   # got minimized: bring it back without taking focus
-        HWND_TOPMOST, NOSIZE, NOMOVE, NOACTIVATE, SHOWWINDOW = -1, 0x0001, 0x0002, 0x0010, 0x0040
+        HWND_TOPMOST, NOSIZE, NOMOVE, NOACTIVATE, SHOWWINDOW = wintypes_hwnd(-1), 0x0001, 0x0002, 0x0010, 0x0040
         u.SetWindowPos(self.hwnd, HWND_TOPMOST, 0, 0, 0, 0, NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW)
 
     def _move_window(self, x: int, y: int) -> None:
         u = self._user32()
         if u is None or self.hwnd is None:
             return
-        HWND_TOPMOST, NOSIZE, NOACTIVATE = -1, 0x0001, 0x0010
+        HWND_TOPMOST, NOSIZE, NOACTIVATE = wintypes_hwnd(-1), 0x0001, 0x0010
         u.SetWindowPos(self.hwnd, HWND_TOPMOST, int(x), int(y), 0, 0, NOSIZE | NOACTIVATE)
         self.win_pos = [int(x), int(y)]
 
