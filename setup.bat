@@ -58,7 +58,7 @@ python -m pip install torch torchvision --index-url https://download.pytorch.org
 
 echo.
 echo [2/4] Main packages...
-python -m pip install "numpy>=1.26" "opencv-python>=4.9" "pygame>=2.5" "requests>=2.31" "mss>=9.0" "ultralytics>=8.3" "pytest>=8.0" "dxcam>=0.0.5" || (
+python -m pip install "numpy>=1.26" "opencv-python>=4.9" "pygame-ce>=2.5" "requests>=2.31" "mss>=9.0" "ultralytics>=8.3" "pytest>=8.0" "dxcam>=0.0.5" || (
   echo Install failed. Send a screenshot of the error.
   pause & exit /b 1
 )
@@ -78,6 +78,7 @@ if not exist .env copy .env.example .env >nul
 echo.
 python -c "import torch; print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none found - update your NVIDIA driver, using CPU for now')"
 python -m pytest -q tests
+echo ok> .venv\setup_ok
 echo.
 echo Setup finished.
 if "%~1"=="--from-start" exit /b 0
