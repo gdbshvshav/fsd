@@ -79,6 +79,8 @@ class Dashboard:
         self.compact = overlay or not (0 < monitor < len(sizes))
         if self.compact:
             self.W, self.H = int(st.ui_size[0]), int(st.ui_size[1])
+            if self.W == 640 and self.H == 360:          # old default -> bigger default for the camera view
+                self.W, self.H = 800, 450
             x, y = st.ui_pos or (sizes[0][0] - self.W - 16, 64)
         else:
             self.W, self.H = sizes[monitor]
@@ -114,6 +116,8 @@ class Dashboard:
         self.preview_cache: tuple[str | None, list] = (None, [])
         self.blink = 0.0
         self.show_camera = not self.compact
+        self.view = "camera"          # "camera" = your game, greyed, with what FSD sees highlighted; "3d" = map view
+        self._rect_t = 0.0
         self._resize_at = 0.0
 
     # ---------------- window management (Windows) ----------------
@@ -258,6 +262,8 @@ class Dashboard:
             return True
         if ev.key == pygame.K_c:
             self.show_camera = not self.show_camera
+        if ev.key == pygame.K_v:
+            self.view = "3d" if self.view == "camera" else "camera"
         if ev.key == pygame.K_ESCAPE and (ev.mod & pygame.KMOD_SHIFT):
             return False
         return True
@@ -266,6 +272,17 @@ class Dashboard:
     def draw(self, dt: float) -> None:
         snap = self.app.snapshot()
         w, plan = snap.world, snap.plan
+        self.blink_t = getattr(self, "blink_t", 0.0) + dt
+        if time.time() - self._rect_t > 1.0 and self.hwnd:
+            self._rect_t = time.time()
+            from ..winput import window_rect
+            self.app.ui_rect = window_rect(self.hwnd)     # so FSD ignores its own window
+        if self.view == "camera":
+            self.blink = (self.blink + dt) % 1.0
+            self._draw_camera_view(snap, w, plan)
+            if self.app.prompt_open:
+                self._draw_prompt()
+            return
         self.road_w = int(self.W * (0.55 if self.compact else 0.64))
         self.screen.fill(BG)
         self.road.fill((0, 0, 0, 0))
@@ -299,6 +316,164 @@ class Dashboard:
             self._draw_camera(snap.debug_img)
         if self.app.prompt_open:
             self._draw_prompt()
+
+    # ================= camera view: your game, greyed, with highlights =================
+    def _draw_camera_view(self, snap, w, plan) -> None:
+        import cv2
+        Wv, Hv = self.W, self.H
+        img = self.app.view_frame(Wv, Hv)
+        if img is None:
+            self.screen.fill(BG)
+            self._text(self.f_med, "Waiting for the game screen...", DIM, (Wv // 2, Hv // 2), "center")
+            return
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        base = cv2.cvtColor((g.astype(np.float32) * 0.42 + 18).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        over = base.copy()
+        per = self.app.perception
+        geo = per.geo
+        if w is not None and geo is not None:
+            pw, ph = self.app.proc_size
+            sx, sy = Wv / pw, Hv / ph
+
+            def S(pts):
+                pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
+                return np.stack([pts[:, 0] * sx, pts[:, 1] * sy], 1).astype(np.int32)
+
+            def curve(coeffs, x0, x1, dy=0.0):
+                xs = np.linspace(x0, x1, 28)
+                a, b, c = coeffs
+                p = geo.vehicle_to_screen(np.stack([xs, a * xs * xs + b * xs + c + dy], 1))
+                keep = (p[:, 1] > geo.horizon_y + 2) & (p[:, 1] < ph)
+                return S(p[keep])
+
+            ln = w.lanes
+            # planned path: blue ribbon on the road
+            if plan is not None and plan.path and plan.mode.value != "off":
+                xs = np.array([q[0] for q in plan.path])
+                ys = np.array([q[1] for q in plan.path])
+                keep = xs >= 1.0
+                if keep.sum() > 2:
+                    L = geo.vehicle_to_screen(np.stack([xs[keep], ys[keep] - 0.9], 1))
+                    R = geo.vehicle_to_screen(np.stack([xs[keep], ys[keep] + 0.9], 1))
+                    poly = np.vstack([S(L), S(R)[::-1]])
+                    cv2.fillPoly(over, [poly], (255, 140, 40))
+            # turn preview
+            if plan is not None and plan.turn_preview:
+                p = geo.vehicle_to_screen(np.array(plan.turn_preview, dtype=np.float32))
+                keep = (p[:, 1] > geo.horizon_y + 2) & (p[:, 1] < ph)
+                pts = S(p[keep])
+                if len(pts) > 1 and (self.blink < 0.6):
+                    cv2.polylines(base, [pts], False, (255, 160, 60), max(3, Hv // 120), cv2.LINE_AA)
+            cv2.addWeighted(over, 0.35, base, 0.65, 0, base)
+            # lane lines
+            th = max(2, Hv // 220)
+            for side in ("left", "right", "left2", "right2"):
+                line = getattr(ln, side)
+                if line is None:
+                    continue
+                col = (40, 200, 255) if line.color == "yellow" else (255, 255, 255)
+                if side.endswith("2"):
+                    col = tuple(int(c * 0.55) for c in col)
+                pts = curve(line.coeffs, 2.0, min(55.0, max(8.0, line.x_max)))
+                if len(pts) > 1:
+                    cv2.polylines(base, [pts], False, col, th + (1 if not side.endswith("2") else 0), cv2.LINE_AA)
+            # stop line / crosswalk
+            for d, col, label in ((w.stop_line_dist, (60, 60, 255), "STOP"),
+                                  (plan.stop_at if plan is not None and plan.stop_at is not None else 999,
+                                   (60, 60, 255), "STOP"),
+                                  (w.crosswalk_dist, (0, 190, 255), "CROSSWALK")):
+                if d < 80:
+                    c = ln.center[2] if ln.conf > 0 else 0.0
+                    p = S(geo.vehicle_to_screen(np.array([[d, c - 1.9], [d, c + 1.9]])))
+                    cv2.line(base, tuple(p[0]), tuple(p[1]), col, th * 3, cv2.LINE_AA)
+                    cv2.putText(base, label, (int(p[1][0]) + 6, int(p[1][1])), 0, 0.45, col, 1, cv2.LINE_AA)
+            # objects
+            lead_id = plan.lead.track_id if plan is not None and plan.lead is not None else None
+            for o in w.objects:
+                x1, y1, x2, y2 = [int(v * (sx if i % 2 == 0 else sy)) for i, v in enumerate(o.box)]
+                if o.kind == "light":
+                    st = o.extra.get("state", "off")
+                    col = {"red": (60, 60, 255), "yellow": (0, 210, 255), "green": (90, 230, 90)}.get(st)
+                    if col is None:
+                        continue                       # backs / unlit heads: don't clutter
+                    cv2.rectangle(base, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), col, 2, cv2.LINE_AA)
+                    cv2.circle(base, ((x1 + x2) // 2, y1 - 10), 6, col, -1, cv2.LINE_AA)
+                    continue
+                col = {"car": (255, 200, 120), "person": (60, 170, 255), "cone": (0, 140, 255),
+                       "stop_sign": (60, 60, 255), "speed_sign": (240, 240, 240), "emergency": (255, 80, 255)}.get(
+                    o.kind, (200, 200, 200))
+                if o.track_id == lead_id and lead_id is not None:
+                    col = (255, 130, 40)
+                    sub = base[max(0, y1):y2, max(0, x1):x2]
+                    if sub.size:
+                        sub[:] = (sub * 0.6 + np.array(col) * 0.4).astype(np.uint8)
+                cv2.rectangle(base, (x1, y1), (x2, y2), col, 2, cv2.LINE_AA)
+                label = o.kind if o.kind != "car" else f"{o.x:.0f} m"
+                cv2.putText(base, label, (x1, max(12, y1 - 4)), 0, 0.42, col, 1, cv2.LINE_AA)
+        surf = pygame.image.frombuffer(base[:, :, ::-1].tobytes(), (Wv, Hv), "RGB")
+        self.screen.blit(surf, (0, 0))
+        self._draw_hud(snap, w, plan)
+
+    def _draw_hud(self, snap, w, plan) -> None:
+        """Speed, FSD state, light, turn signal: a slim bar across the top."""
+        Wv, Hv = self.W, self.H
+        bar_h = max(48, int(Hv * 0.13))
+        bar = pygame.Surface((Wv, bar_h), pygame.SRCALPHA)
+        bar.fill((10, 11, 14, 200))
+        self.screen.blit(bar, (0, 0))
+        engaged = snap.engaged
+        mode = plan.mode if plan else Mode.OFF
+        unit = w.speed_unit if w else "kph"
+        spd = float(self.e_speed.to(w.speed_kph if w else 0, 1 / 60)) if w else 0.0
+        shown = spd / 1.609344 if unit == "mph" else spd
+        x = 12
+        r = self._text(self.f_big, f"{shown:.0f}", WHITE if (w and w.speed_valid) else DIM, (x, bar_h // 2), "midleft")
+        self._text(self.f_small, unit.upper() if (w and w.speed_valid) else "speed ?", DIM, (r.right + 6, bar_h // 2),
+                   "midleft")
+        x = r.right + 70
+        if w is not None and w.speed_limit_kph:
+            lim = w.speed_limit_kph / 1.609344 if unit == "mph" else w.speed_limit_kph
+            sign = pygame.Rect(x, (bar_h - int(bar_h * 0.8)) // 2, int(bar_h * 0.62), int(bar_h * 0.8))
+            pygame.draw.rect(self.screen, WHITE, sign, border_radius=4)
+            self._text(self.f_small, f"{lim:.0f}", (20, 20, 20), sign.center, "center")
+            x = sign.right + 12
+        pill = pygame.Rect(x, bar_h // 2 - 15, max(150, int(Wv * 0.3)), 30)
+        pcol = BLUE if engaged else (60, 64, 74)
+        if mode == Mode.FAULT:
+            pcol = RED if self.blink < 0.5 else (120, 30, 30)
+        pygame.draw.rect(self.screen, pcol, pill, border_radius=15)
+        label = MODE_TEXT.get(mode, mode.value)
+        if engaged and plan is not None and plan.reason:
+            label = f"{label} · {plan.reason}"
+        self._text(self.f_small, label[:44], WHITE, pill.center, "center")
+        x = pill.right + 14
+        if plan is not None:
+            on = self.blink < 0.5
+            s = 9
+            lc = GREEN if (plan.turn_pending == "left" and on) else (60, 64, 74)
+            rc = GREEN if (plan.turn_pending == "right" and on) else (60, 64, 74)
+            cy = bar_h // 2
+            pygame.draw.polygon(self.screen, lc, [(x, cy), (x + s, cy - s), (x + s, cy + s)])
+            pygame.draw.polygon(self.screen, rc, [(x + 3 * s + 6, cy), (x + 2 * s + 6, cy - s), (x + 2 * s + 6, cy + s)])
+            x += 3 * s + 20
+        if w is not None and w.signal.state != Light.NONE and x < Wv - 30:
+            col = {Light.RED: RED, Light.YELLOW: YELLOW, Light.GREEN: GREEN, Light.FLASHING_RED: RED}.get(
+                w.signal.state, DIM)
+            if not (w.signal.state == Light.FLASHING_RED and self.blink > 0.5):
+                pygame.draw.circle(self.screen, col, (x + 10, bar_h // 2), 10)
+            self._text(self.f_small, f"{w.signal.distance:.0f} m", WHITE, (x + 26, bar_h // 2), "midleft")
+        # bottom line: newest message + keys
+        st = snap.status
+        log = list(st.get("log", []))
+        msg = (plan.alert if plan is not None and plan.alert else (log[-1][9:] if log else ""))
+        foot = pygame.Surface((Wv, self.line_h * 2 + 8), pygame.SRCALPHA)
+        foot.fill((10, 11, 14, 170))
+        self.screen.blit(foot, (0, Hv - foot.get_height()))
+        self._text(self.f_small, msg[:90], WHITE, (10, Hv - 2 * self.line_h - 4))
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · drag to move   {st.get('fps', 0):.0f} fps · params v{st.get('params', 0)}")
+        self._text(self.f_small, keys[:110], (140, 144, 154), (10, Hv - self.line_h - 2))
+        if snap.training_on:
+            self._text(self.f_small, f"● REC {snap.training_count}", RED, (Wv - 10, bar_h + 6), "topright")
 
     def _poly_pts(self, coeffs, x0=-8.0, x1=80.0, n=44, dy=0.0):
         a, b, c = coeffs

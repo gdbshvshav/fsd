@@ -36,65 +36,46 @@ def lamp_masks(hsv: np.ndarray) -> dict[str, np.ndarray]:
 def classify_light(crop: np.ndarray) -> tuple[str, float]:
     """Return ('red'|'yellow'|'green'|'off'|'back', confidence) for a light crop.
 
-    ER:LC signal heads are a black body with a bright yellow frame and three
-    round lamps stacked vertically. The yellow frame fools a plain colour count,
-    so we look at the lamp column only and ask which of the three cells is lit.
-    Position decides the state; the lamp's hue must agree for high confidence.
+    Measured on real ER:LC screenshots: a LIT lamp is clipped to full brightness
+    (V ~255, saturated), while the yellow housing tops out around V 215-230. So
+    "lit" = the very brightest saturated pixels, and their hue gives the colour.
+    Lamp position (red top, green bottom) is used as a tie-breaker.
     """
-    if crop is None or crop.size == 0 or min(crop.shape[:2]) < 6:
+    if crop is None or crop.size == 0 or min(crop.shape[:2]) < 4:
         return "off", 0.0
     h, w = crop.shape[:2]
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-
-    vertical = h >= w * 1.3
-    if not vertical:
-        return _classify_by_hue(hsv)
-
-    # lamp column: centre half of the width, inside the frame
-    x0, x1 = int(w * 0.28), max(int(w * 0.28) + 1, int(w * 0.72))
-    y0, y1 = int(h * 0.05), max(int(h * 0.05) + 3, int(h * 0.95))
-    col_v = V[y0:y1, x0:x1].astype(np.float32)
-    col_h, col_s = H[y0:y1, x0:x1], S[y0:y1, x0:x1]
-
-    # back of a signal: flat yellow, no dark body showing
-    body_dark = (col_v < 80).mean()
-    flat_yellow = ((H >= 15) & (H <= 35) & (S > 90) & (V > 110)).mean()
-    if flat_yellow > 0.55 and body_dark < 0.12:
-        return "back", float(min(1.0, flat_yellow))
-
-    n = col_v.shape[0]
-    cells = [(0, n // 3), (n // 3, 2 * n // 3), (2 * n // 3, n)]
-    bright = []
-    for a, b in cells:
-        cell = col_v[a:b]
-        if cell.size == 0:
-            bright.append(0.0)
-            continue
-        k = max(1, cell.size // 4)
-        bright.append(float(np.sort(cell.ravel())[-k:].mean()))   # brightest quarter
-    order = np.argsort(bright)[::-1]
-    top, second = bright[order[0]], bright[order[1]]
-    if top < 120 or top - second < 30:
-        return "off", 0.5 if body_dark > 0.3 else 0.2
-    idx = int(order[0])
-    by_pos = ("red", "yellow", "green")[idx]
-    a, b = cells[idx]
-    hh, ss, vv = col_h[a:b], col_s[a:b], col_v[a:b]
-    lit = (vv > top - 25) & (ss > 70)
-    hue = None
-    if lit.sum() >= 3:
-        hm = hh[lit].astype(np.float32)
-        red_share = ((hm <= 9) | (hm >= 168)).mean()
-        yel_share = ((hm >= 10) & (hm <= 35)).mean()
-        grn_share = ((hm >= 40) & (hm <= 100)).mean()
-        hue = ("red", "yellow", "green")[int(np.argmax([red_share, yel_share, grn_share]))]
-    conf = 0.6 + min(0.3, (top - second) / 200)
-    if hue is None:
-        return by_pos, conf * 0.8
-    if hue == by_pos:
-        return by_pos, min(1.0, conf + 0.1)
-    return by_pos, conf * 0.6     # position beats hue (glare/tint), but less sure
+    H, S, V = hsv[:, :, 0].astype(np.int16), hsv[:, :, 1], hsv[:, :, 2]
+    vmax = int(V.max())
+    yellow_body = ((H >= 15) & (H <= 35) & (S > 90) & (V > 110)).mean()
+    if vmax < 238:
+        # nothing lit. A face-on head shows dark lamps; a back/side is flat yellow.
+        dark = (V < 90).mean()
+        if yellow_body > 0.5 and dark < 0.1:
+            return "back", float(min(1.0, yellow_body))
+        return "off", 0.5 if dark > 0.15 else 0.3
+    lit = (V >= max(238, vmax - 10)) & (S > 90)
+    n = int(lit.sum())
+    if n < 2:
+        return "off", 0.3
+    hh = H[lit]
+    counts = {
+        "red": int(((hh <= 12) | (hh >= 166)).sum()),
+        "yellow": int(((hh >= 13) & (hh <= 36)).sum()),
+        "green": int(((hh >= 40) & (hh <= 100)).sum()),
+    }
+    best = max(counts, key=counts.get)
+    if counts[best] < 2:
+        return "off", 0.3
+    conf = 0.55 + 0.35 * counts[best] / max(1, n)
+    if h >= w * 1.3:                                   # vertical head: check the lamp sits right
+        ys = np.nonzero(lit)[0]
+        cy = float(ys.mean()) / h
+        expect = {"red": (0.0, 0.5), "yellow": (0.2, 0.8), "green": (0.5, 1.0)}[best]
+        conf += 0.1 if expect[0] <= cy <= expect[1] else -0.2
+    if best == "yellow" and yellow_body > 0.6 and n > 0.5 * h * w:
+        return "back", 0.5                             # whole box glowing yellow = sunlit back
+    return best, float(np.clip(conf, 0.0, 1.0))
 
 
 def _classify_by_hue(hsv: np.ndarray) -> tuple[str, float]:

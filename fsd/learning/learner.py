@@ -142,13 +142,26 @@ class Learner:
                     self._diagnose(job[1], job[2], deferred)
                 elif kind == "tune":
                     self._tune(job[1], deferred)
+                elif kind == "local":
+                    if self.is_engaged():
+                        deferred.append(job)       # replays wait until you're driving yourself
+                    else:
+                        self._local_fix(job[1])
                 elif kind == "validate":
                     if self.is_engaged():
                         deferred.append(job)       # heavy replays wait until you're driving yourself
                     else:
                         self._validate(*job[1:])
+            except KeyError as e:                       # a key was rejected: say it ONCE, clearly
+                which = "Gemini" if "Gemini" in str(e) else "Groq"
+                url = "https://aistudio.google.com/apikey" if which == "Gemini" else "https://console.groq.com/keys"
+                self.say(f"{which} key in .env is not valid - make a new one at {url}. "
+                         f"Learning still works without it (local tuning).")
+                discord().embed(f"{which} key rejected", f"Make a new key at {url} and put it in .env.", RED)
+                if kind == "diagnose":
+                    self.q.put(("local", job[1]))
             except Exception as e:  # noqa: BLE001
-                self.say(f"{kind} failed: {e}")
+                self.say(f"{kind} failed: {str(e)[:120]}")
             finally:
                 self.busy = ""
 
@@ -166,8 +179,9 @@ class Learner:
             frames, _, meta = load_scenario(d)
             t_dis = meta.get("disengage_t", 0)
             near = [f for t, f in frames if t <= t_dis][-3:]
-            discord().embed(f"Disengage saved: {d.name}", "No Gemini key, so no automatic review.", ORANGE,
-                            [("Your note", note or "(none)", False)], files=near)
+            discord().embed(f"Disengage saved: {d.name}", "No working Gemini key, so I'm tuning from your "
+                            "correction instead.", ORANGE, [("Your note", note or "(none)", False)], files=near)
+            self.q.put(("local", d))
             return
         self.busy = "Gemini reviewing the disengage..."
         frames, rows, meta = load_scenario(d)
@@ -202,9 +216,90 @@ class Learner:
             self.say(f"tip: {res['advice_for_driver']}")
         fix = clamp_changes(res.get("fix") or {})
         if not fix:
-            self.say("No parameter fix proposed (probably perception) - try Training mode (F2) on this spot.")
+            self.say("Gemini proposed no setting change - trying local tuning from your correction.")
+            self.q.put(("local", d))
             return
         self.q.put(("validate", fix, d, "gemini", f"disengage {d.name}: {res.get('likely_cause', '')[:80]}"))
+
+    # ------------------------------------------------------------------ local learning
+    LOCAL_CANDIDATES = {
+        # what you did when you took over -> which settings could explain it
+        "steer": [{"steer_gain": 1.15}, {"steer_gain": 0.87}, {"steer_damping": 1.3}, {"steer_damping": 0.75},
+                  {"lookahead_base_m": 1.2}, {"lookahead_base_m": 0.85}, {"lane_smoothing": 1.3}],
+        "brake": [{"comfort_decel": 0.85}, {"stop_line_offset_m": "+0.5"}, {"follow_time_gap_s": 1.15},
+                  {"speed_over_limit_kph": "-2"}, {"curve_lat_accel": 0.88}, {"light_to_stop_m": "+2"}],
+        "throttle": [{"speed_over_limit_kph": "+2"}, {"curve_lat_accel": 1.12}, {"throttle_kp": 1.15},
+                     {"follow_time_gap_s": 0.9}, {"stop_sign_wait_s": 0.8}],
+    }
+
+    def _local_fix(self, d: Path) -> None:
+        """No AI needed: look at what YOU did after taking over, try the settings that
+        could explain it, replay each on your saved drives, keep the best one."""
+        from .replay import standard_suite, validate
+        frames, rows, meta = load_scenario(d)
+        t_dis = meta.get("disengage_t", 0)
+        after = [r for r in rows if t_dis <= r["t"] <= t_dis + 3 and not r.get("engaged")]
+        if len(after) < 5:
+            self.say("Not enough of your driving after the takeover to learn from.")
+            return
+        steer = np.mean([(1 if "D" in r.get("keys", []) else 0) - (1 if "A" in r.get("keys", []) else 0) for r in after])
+        pedal = np.mean([(1 if "W" in r.get("keys", []) else 0) - (1 if "S" in r.get("keys", []) else 0) for r in after])
+        if abs(steer) >= 0.15:
+            kind = "steer"
+        elif pedal <= -0.15:
+            kind = "brake"
+        elif pedal >= 0.15:
+            kind = "throttle"
+        else:
+            self.say("Couldn't tell what you corrected (no clear steering/braking after the takeover).")
+            return
+        self.busy = f"Learning from your {kind} correction..."
+        cur = self.store.snapshot()
+        cands = []
+        for c in self.LOCAL_CANDIDATES[kind]:
+            ch = {}
+            for k, v in c.items():
+                ch[k] = cur[k] + float(v) if isinstance(v, str) else cur[k] * v
+            cands.append(clamp_changes(ch))
+        if kind == "steer":                     # you kept steering one way -> shift where we sit in the lane
+            cands.append(clamp_changes({"lane_center_bias_m": cur["lane_center_bias_m"] + 0.25 * np.sign(steer)}))
+        rep = self._replay()
+        base = rep.score(d, cur).total
+        best, best_score = None, base
+        for ch in cands:
+            cand = dict(cur)
+            cand.update(ch)
+            sc = rep.score(d, cand).total
+            if sc < best_score * 0.97:
+                best, best_score = ch, sc
+        if best is None:
+            self.say(f"Tried {len(cands)} {kind} settings on this clip; none matched what you did better.")
+            discord().embed("Local tuning: no change", f"You corrected **{kind}**. Tried {len(cands)} settings, "
+                            "none drove closer to what you did.", ORANGE)
+            return
+        self.say(f"Best {kind} fix for this clip: {best} ({base:.3f} -> {best_score:.3f}); checking other drives...")
+        ok, report = validate(rep, cur, best, d, standard_suite())
+        self._validate_result(best, d, "local", f"you corrected {kind} in {d.name}", ok, report, cur)
+
+    def _validate_result(self, changes, target, source, note, ok, report, before) -> None:
+        diff = "\n".join(f"`{k}`: {before[k]:.3g} -> {v:.3g}" for k, v in changes.items())
+        who = {"gemini": "Gemini (from a disengage)", "groq": "Groq (tuning)",
+               "local": "Local learning (from your correction)"}.get(source, source)
+        if ok:
+            v = self.store.apply(changes, note, source)
+            self.say(f"Applied {changes} as v{v} (undo: F6).")
+            discord().embed(f"Setting change APPLIED (now v{v})", note, GREEN,
+                            [("Changed", diff, False), ("Suggested by", who, True),
+                             ("Undo", "Press F6 in FSD", True), ("Replay test", report[-1000:], False)])
+            if target is not None:
+                update_meta(target, fix_applied=v)
+        else:
+            self.say(f"Rejected {changes}: {report.splitlines()[-1]}")
+            discord().embed("Setting change REJECTED (nothing changed)", note, RED,
+                            [("Tried", diff, False), ("Suggested by", who, True),
+                             ("Why rejected", report[-1000:], False)])
+            if target is not None:
+                update_meta(target, fix_rejected={"changes": changes, "report": report})
 
     def _post_review(self, d: Path, note: str, res: dict, pick: list, tel: list, t_dis: float) -> None:
         """Send Gemini's review to Discord with the exact frames it looked at."""
@@ -248,23 +343,8 @@ class Learner:
     def _validate(self, changes: dict, target: Path | None, source: str, note: str) -> None:
         from .replay import standard_suite, validate
         self.busy = "Testing a fix on saved drives..."
-        suite = standard_suite()
         before = self.store.snapshot()
-        ok, report = validate(self._replay(), before, changes, target, suite)
-        diff = "\n".join(f"`{k}`: {before[k]:.3g} -> {v:.3g}" for k, v in changes.items())
-        who = {"gemini": "Gemini (from a disengage)", "groq": "Groq (tuning)"}.get(source, source)
-        if ok:
-            v = self.store.apply(changes, note, source)
-            discord().embed(f"Setting change APPLIED (now v{v})", note, GREEN,
-                            [("Changed", diff, False), ("Suggested by", who, True),
-                             ("Undo", "Press F6 in FSD", True), ("Replay test", report[-1000:], False)])
-            self.say(f"Applied {changes} as v{v} (rollback: F6). {report.splitlines()[-1]}")
-            if target is not None:
-                update_meta(target, fix_applied=v)
-        else:
-            discord().embed("Setting change REJECTED (nothing changed)", note, RED,
-                            [("Tried", diff, False), ("Suggested by", who, True),
-                             ("Why rejected", report[-1000:], False)])
-            self.say(f"Rejected {changes}: {report.splitlines()[-1]}")
-            if target is not None:
-                update_meta(target, fix_rejected={"changes": changes, "report": report})
+        ok, report = validate(self._replay(), before, changes, target, standard_suite())
+        self._validate_result(changes, target, source, note, ok, report, before)
+        if not ok and source == "gemini" and target is not None:
+            self.q.put(("local", target))             # Gemini's idea failed: learn from your correction

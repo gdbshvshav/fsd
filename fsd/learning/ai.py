@@ -108,9 +108,14 @@ class Gemini:
             model = self._pick_model()
             r = requests.post(f"{GEMINI_URL}/models/{model}:generateContent", params={"key": self.key},
                               json=body, timeout=timeout)
+        if r.status_code in (400, 401, 403) and ("API key" in r.text or "PERMISSION" in r.text
+                                                 or "UNAUTHENTICATED" in r.text):
+            self.ok = False                            # stop retrying a dead key
+            self.error = "Gemini key rejected"
+            raise KeyError(self.error)
         if r.status_code != 200:
-            self.error = f"Gemini {r.status_code}: {r.text[:200]}"
-            raise RuntimeError(self.error)
+            self.error = f"Gemini {r.status_code}"
+            raise RuntimeError(f"{self.error}: {r.text[:120]}")
         data = r.json()
         text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
         return _parse_json(text)
@@ -153,6 +158,10 @@ class Groq:
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
         r = requests.post(f"{GROQ_URL}/chat/completions", headers=self._headers(), json=body, timeout=timeout)
+        if r.status_code in (401, 403):
+            self.ok = False
+            self.error = "Groq key rejected"
+            raise KeyError(self.error)
         if r.status_code != 200:
             self.error = f"Groq {r.status_code}: {r.text[:200]}"
             raise RuntimeError(self.error)

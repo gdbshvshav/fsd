@@ -48,6 +48,25 @@ class Perception:
         x1, y1, x2, y2 = self.cal.ego_mask
         self.ego_box = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
 
+    def _is_ego(self, box) -> bool:
+        """Our own car: the vehicle sitting in the middle of the chase camera.
+
+        Its box also slowly follows our car (zooming, different vehicles), so a
+        truck or a bus is recognised as 'you' too.
+        """
+        ex1, ey1, ex2, ey2 = self.ego_box
+        ew, eh = ex2 - ex1, ey2 - ey1
+        x1, y1, x2, y2 = box
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        inside = (ex1 - 0.25 * ew < cx < ex2 + 0.25 * ew) and (ey1 - 0.25 * eh < cy < ey2 + 0.25 * eh)
+        if not (inside or iou(box, self.ego_box) > 0.3):
+            return False
+        bw, bh = x2 - x1, y2 - y1
+        if 0.4 * ew < bw < 2.5 * ew and 0.4 * eh < bh < 2.5 * eh:
+            a = 0.05                                       # follow our car's box slowly
+            self.ego_box = tuple(int((1 - a) * e + a * b) for e, b in zip(self.ego_box, box))
+        return True
+
     def status(self) -> dict:
         return {
             "detector": ("custom ER:LC model" if self.detector and self.detector.custom else
@@ -90,7 +109,7 @@ class Perception:
                 continue
             if ob.score < p["object_min_score"]:
                 continue
-            if ob.kind in ("car", "emergency") and iou(ob.box, self.ego_box) > 0.3:
+            if ob.kind in ("car", "emergency") and self._is_ego(ob.box):
                 continue  # that's our own car in the chase camera
             if ob.kind in ("car", "person", "cone", "emergency"):
                 x1, y1, x2, y2 = ob.box

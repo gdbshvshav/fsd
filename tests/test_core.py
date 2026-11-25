@@ -77,7 +77,7 @@ def test_takeover_and_hotkeys():
 # ---------------------------------------------------------------- lights
 def _signal_crop(lit: str) -> np.ndarray:
     img = np.zeros((90, 36, 3), np.uint8)
-    img[:] = (0, 200, 240)                              # yellow frame (BGR)
+    img[:] = (0, 190, 225)                              # yellow frame (BGR), like ER:LC (V~225)
     img[4:86, 6:30] = (20, 20, 20)                      # black body
     pos = {"red": 17, "yellow": 45, "green": 72}
     col = {"red": (40, 40, 255), "yellow": (0, 200, 255), "green": (80, 255, 60)}
@@ -94,7 +94,7 @@ def test_classify_light_ignores_yellow_frame(state):
 
 def test_light_back_ignored():
     back = np.zeros((90, 36, 3), np.uint8)
-    back[:] = (0, 200, 240)
+    back[:] = (0, 190, 225)
     assert classify_light(back)[0] == "back"
 
 

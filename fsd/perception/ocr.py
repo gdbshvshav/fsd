@@ -64,32 +64,42 @@ class OcrEngine:
         return out
 
 
+SPEED_RE = re.compile(r"^\s*(\d{1,3})\s*(km\s*/?\s*h|kph|mph)\b", re.I)
+
+
 def find_speedo(ocr: OcrEngine, frame: np.ndarray) -> tuple[list[float], str] | None:
-    """Locate the speedometer. Returns (roi fractions, unit) or None."""
+    """Locate the speedometer. Returns (roi fractions, unit) or None.
+
+    ER:LC draws it as one piece of text like "0 KM/H" or "45 MPH" in a box at the
+    bottom-centre; some cars split the number and the unit, so both are handled.
+    """
     H, W = frame.shape[:2]
     y0 = int(H * 0.55)
-    items = ocr.read(frame[y0:])
-    units = [(t, b) for t, b, s in items if re.search(r"(mph|km/?h|kph)", t.lower())]
-    nums = [(t, b) for t, b, s in items if re.fullmatch(r"\d{1,3}", t.strip())]
-    if not units or not nums:
+    items = [(t, b, s) for t, b, s in ocr.read(frame[y0:]) if "not read" not in t.lower()]
+    cands = []
+    for t, b, s in items:                          # "0 KM/H" in one token
+        m = SPEED_RE.match(t.replace("KMH", "KM/H"))
+        if m:
+            cands.append((b, "mph" if "mph" in m.group(2).lower() else "kph"))
+    if not cands:                                  # number and unit as separate tokens
+        units = [(t, b) for t, b, s in items if re.fullmatch(r"\s*(km\s*/?\s*h|kph|mph)\s*", t, re.I)]
+        nums = [(t, b) for t, b, s in items if re.fullmatch(r"\s*\d{1,3}\s*", t)]
+        for ut, ub in units:
+            near = [(abs((ub[0] + ub[2]) / 2 - (nb[0] + nb[2]) / 2) + abs((ub[1] + ub[3]) / 2 - (nb[1] + nb[3]) / 2), nb)
+                    for _, nb in nums]
+            if near:
+                d, nb = min(near)
+                if d < H * 0.12:
+                    cands.append(((min(nb[0], ub[0]), min(nb[1], ub[1]), max(nb[2], ub[2]), max(nb[3], ub[3])),
+                                  "mph" if "mph" in ut.lower() else "kph"))
+    if not cands:
         return None
-    best = None
-    for ut, ub in units:
-        ucx, ucy = (ub[0] + ub[2]) / 2, (ub[1] + ub[3]) / 2
-        for nt, nb in nums:
-            ncx, ncy = (nb[0] + nb[2]) / 2, (nb[1] + nb[3]) / 2
-            d = np.hypot(ucx - ncx, ucy - ncy)
-            if best is None or d < best[0]:
-                best = (d, nb, ub, ut)
-    if best is None or best[0] > H * 0.15:
-        return None
-    _, nb, ub, ut = best
-    x1 = min(nb[0], ub[0]) - 10
-    y1 = min(nb[1], ub[1]) - 10 + y0
-    x2 = max(nb[2], ub[2]) + 10
-    y2 = max(nb[3], ub[3]) + 10 + y0
-    unit = "mph" if "mph" in ut.lower() else "kph"
-    return [max(0, x1) / W, max(0, y1) / H, min(W, x2) / W, min(H, y2) / H], unit
+    # the real speedometer is the one nearest the bottom-centre
+    b, unit = min(cands, key=lambda c: abs((c[0][0] + c[0][2]) / 2 - W / 2))
+    pad_x, pad_y = (b[2] - b[0]) * 0.6 + 10, (b[3] - b[1]) * 0.5 + 6
+    x1, y1 = b[0] - pad_x, b[1] - pad_y + y0
+    x2, y2 = b[2] + pad_x, b[3] + pad_y + y0
+    return [max(0.0, x1 / W), max(0.0, y1 / H), min(1.0, x2 / W), min(1.0, y2 / H)], unit
 
 
 class OcrWorker:
@@ -111,6 +121,7 @@ class OcrWorker:
         self.limit_time = 0.0
         self._recent: deque[float] = deque(maxlen=3)
         self._pending: float | None = None
+        self._misses = 0
         self._last_find = 0.0
         self.status = "starting"
 
@@ -166,18 +177,25 @@ class OcrWorker:
         val = None
         for text, _, score in items:
             low = text.lower()
+            if "not read" in low:
+                continue
             if self.cal.speed_unit == "auto":
                 if "mph" in low:
                     self.unit = "mph"
                 elif "km" in low or "kph" in low:
                     self.unit = "kph"
-            m = re.search(r"\d{1,3}", text)
-            if m and score > 0.5:
-                val = float(m.group())
+            m = SPEED_RE.match(text) or re.fullmatch(r"\s*(\d{1,3})\s*", text)
+            if m and score > 0.45:
+                val = float(m.group(1))
         if val is None:
             if time.perf_counter() - self.speed_time > 1.0:
                 self.speed_valid = False
+            self._misses += 1
+            if self._misses > 40:               # ~6 s of no reading: the HUD moved, search again
+                self.cal.speedo_roi = None
+                self._misses = 0
             return
+        self._misses = 0
         kph = val * KPH_PER_MPH if self.unit == "mph" else val
         # A single big jump is usually a misread: only accept it if the next read agrees.
         if self.speed_valid and abs(kph - self.speed_kph) > 45:

@@ -107,8 +107,16 @@ def auto_calibrate(frames: list[np.ndarray], cal: Calibration, lane_width_m: flo
 
 
 def from_lines(L: np.ndarray, R: np.ndarray, W: int, H: int, cal: Calibration,
-               lane_width_m: float = 3.7) -> tuple[dict | None, str]:
-    """Calibration from the ego lane's left/right lines on screen (x = a*y + b)."""
+               lane_width_m: float = 3.7, car_rear_row: float | None = None) -> tuple[dict | None, str]:
+    """Calibration from the ego lane's left/right lines on screen (x = a*y + b, pixels).
+
+    Camera model: a flat road seen by Roblox's camera. The lane width at one row
+    gives the distance to that row; every other row's distance follows from the
+    horizon. The bottom of your car (car_rear_row, fraction of screen height)
+    tells us where the car is, so the bird's-eye view starts at your FRONT bumper.
+    ER:LC's chase camera sits high and far back, so the bottom of the screen is
+    road BEHIND the car.
+    """
     if abs(L[0] - R[0]) < 1e-6:
         return None, "Lane lines look parallel on screen; is the camera top-down?"
     y_h = (R[1] - L[1]) / (L[0] - R[0])
@@ -116,27 +124,42 @@ def from_lines(L: np.ndarray, R: np.ndarray, W: int, H: int, cal: Calibration,
     if not (H * 0.15 < y_h < H * 0.7) or not (W * 0.3 < x_h < W * 0.7):
         return None, (f"Odd vanishing point ({x_h / W:.0%}, {y_h / H:.0%}). Use a straight road with the camera "
                       "straight behind the car, then try again.")
-    yb = H * 0.93
-    yt = y_h + 0.28 * (yb - y_h)
-    xl_b, xr_b = L[0] * yb + L[1], R[0] * yb + R[1]
-    xl_t, xr_t = L[0] * yt + L[1], R[0] * yt + R[1]
-    wb = xr_b - xl_b
-    if not (W * 0.05 < wb < W * 0.8):
+    yr = H * 0.93                                   # reference row for the lane width
+    wr = (R[0] * yr + R[1]) - (L[0] * yr + L[1])
+    if not (W * 0.05 < wr < W * 1.2):
         return None, "The lane's width on screen looks wrong; make sure both of YOUR lane's lines are visible."
     focal = (H / 2) / math.tan(math.radians(cal.vfov_deg) / 2)
-    d_b = focal * lane_width_m / wb
-    d_t = d_b * (yb - y_h) / (yt - y_h)
-    if not (3.0 < d_b < 30.0):
-        return None, f"Distance estimate is off ({d_b:.1f} m). Try again on a clearer road."
+    K = focal * lane_width_m / wr * (yr - y_h)      # distance(y) = K / (y - y_h)
+
+    def dist(y: float) -> float:
+        return K / max(1e-3, y - y_h)
+
+    def row(d: float) -> float:
+        return y_h + K / d
+
+    rear = car_rear_row if car_rear_row is not None else cal.ego_mask[3]
+    if rear and H * 0.3 < rear * H < H * 0.98 and rear * H > y_h + 5:
+        cam_to_bumper = dist(rear * H) + 4.6        # rear wheels + one car length
+    else:
+        cam_to_bumper = cal.cam_to_bumper_m
+    near = cam_to_bumper + 1.0
+    far = cam_to_bumper + 40.0
+    yb, yt = row(near), row(far)
+    if not (y_h + 3 < yt < yb <= H):
+        return None, "Camera is too low or too flat to see the road ahead; zoom out a little."
+    xl_b, xr_b = L[0] * yb + L[1], R[0] * yb + R[1]
+    xl_t, xr_t = L[0] * yt + L[1], R[0] * yt + R[1]
     fields = {
         "width": int(W), "height": int(H),
         "src_quad": [[float(xl_b / W), float(yb / H)], [float(xr_b / W), float(yb / H)],
                      [float(xr_t / W), float(yt / H)], [float(xl_t / W), float(yt / H)]],
         "quad_width_m": float(lane_width_m),
-        "quad_depth_m": round(float(d_t - d_b), 2),
-        "bumper_to_quad_m": round(float(max(0.5, d_b - cal.cam_to_bumper_m)), 2),
+        "quad_depth_m": round(float(far - near), 2),
+        "bumper_to_quad_m": 1.0,
+        "cam_to_bumper_m": round(float(cam_to_bumper), 2),
     }
-    return fields, f"horizon at {y_h / H:.0%} of screen, near edge {d_b:.1f} m away, sees {d_t:.0f} m ahead."
+    return fields, (f"horizon at {y_h / H:.0%} of screen, camera {cam_to_bumper:.0f} m behind your front bumper, "
+                    f"road view {near - cam_to_bumper:.0f}-{far - cam_to_bumper:.0f} m ahead.")
 
 
 def apply(cal: Calibration, fields: dict) -> None:

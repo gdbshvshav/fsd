@@ -35,7 +35,7 @@ from .perception.calibrate import auto_calibrate
 from .planning.planner import Planner
 from .settings import Settings
 from .ui.draw_debug import annotate
-from .winput import VK, Actuator, InputMonitor, roblox_focused
+from .winput import VK, Actuator, InputMonitor, roblox_client_rect, roblox_focused
 from .world import Mode, Plan, World
 
 LOG_DIR = Path(__file__).resolve().parent.parent / "data" / "logs"
@@ -95,6 +95,10 @@ class App:
         self.pending_scenario = None
         self.calib_frames: list[np.ndarray] | None = None
         self.fps = 0.0
+        self.game_rect: tuple[int, int, int, int] | None = None   # Roblox game area on screen
+        self.ui_rect: tuple[int, int, int, int] | None = None     # our own dashboard window
+        self.proc_size = (1920, 1080)
+        self._rect_t = 0.0
         self.paused_reason = ""
         self._last_tune = time.perf_counter()
         self._force_camera = False
@@ -193,6 +197,51 @@ class App:
             self.learner.diagnose(self.pending_scenario, note)
             self.pending_scenario = None
 
+    # ------------------------------------------------------------------ frames
+    MAX_W = 1920
+
+    def crop_game(self, frame: np.ndarray) -> np.ndarray:
+        """Just the Roblox game area (no taskbar / other windows), with our own
+        dashboard blacked out so FSD never reads its own text or drawings."""
+        now = time.perf_counter()
+        if not isinstance(self.capture, FileSource) and now - self._rect_t > 1.0:
+            self._rect_t = now
+            self.game_rect = roblox_client_rect()
+        H, W = frame.shape[:2]
+        x0 = y0 = 0
+        r = self.game_rect
+        if r is not None:
+            x, y, w, h = r
+            if x >= 0 and y >= 0 and x + w <= W and y + h <= H and w > 200 and h > 200:
+                frame = frame[y:y + h, x:x + w]
+                x0, y0 = x, y
+        if self.ui_rect is not None and not isinstance(self.capture, FileSource):
+            ux, uy, uw, uh = self.ui_rect
+            ux, uy = ux - x0, uy - y0
+            fh, fw = frame.shape[:2]
+            a, b = max(0, ux), max(0, uy)
+            c, d = min(fw, ux + uw), min(fh, uy + uh)
+            if c > a and d > b:
+                frame = frame.copy()
+                frame[b:d, a:c] = 0
+        return frame
+
+    def prep(self, frame: np.ndarray) -> np.ndarray:
+        frame = self.crop_game(frame)
+        H, W = frame.shape[:2]
+        if W > self.MAX_W:                       # 4K: work at 1920 wide (lights are read before this matters)
+            frame = cv2.resize(frame, (self.MAX_W, int(H * self.MAX_W / W)), interpolation=cv2.INTER_AREA)
+        self.proc_size = (frame.shape[1], frame.shape[0])
+        return frame
+
+    def view_frame(self, width: int, height: int) -> np.ndarray | None:
+        """Newest game picture sized for the dashboard (called 60x a second by the UI)."""
+        frame, _, _ = self.capture.latest()
+        if frame is None:
+            return None
+        frame = self.crop_game(frame)
+        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+
     # ------------------------------------------------------------------ control loop
     def snapshot(self) -> Snapshot:
         with self._lock:
@@ -269,6 +318,7 @@ class App:
                 time.sleep(0.002)
                 continue
             last_seq = seq
+            frame = self.prep(frame)
             now = time.perf_counter()
             dt = min(0.2, now - last_t)
             last_t = now

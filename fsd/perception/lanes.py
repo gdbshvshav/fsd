@@ -58,6 +58,9 @@ class LaneFinder:
         k = max(5, int(round(0.55 / mpx)) | 1)          # wider than paint, narrower than sidewalks
         self.k_h = cv2.getStructuringElement(cv2.MORPH_RECT, (k, 1))
         self.k_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, k))
+        self.side_px = max(3, int(0.45 / mpx))               # look 45 cm left/right for road
+        kb = int(2.0 / mpx) | 1                                # 2 m: wider than any paint block
+        self.k_bg = cv2.getStructuringElement(cv2.MORPH_RECT, (kb, kb))
         self.k_road = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(1.2 / mpx) | 1, int(1.2 / mpx) | 1))
         self.ego_mask_screen: np.ndarray | None = None
 
@@ -77,8 +80,9 @@ class LaneFinder:
         Hh, Sv, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
 
         # Road surface: grey (low saturation). ER:LC city asphalt is dark, highway
-        # concrete is light grey, so brightness only excludes white paint itself.
-        asphalt = ((Sv < 50) & (V > 18) & (V < 205)).astype(np.uint8) * 255
+        # concrete is light grey, and Roblox shadows tint the road dark BLUE.
+        shadow = (Hh >= 95) & (Hh <= 130) & (V < 120)
+        asphalt = ((((Sv < 50) & (V > 18) & (V < 205)) | shadow)).astype(np.uint8) * 255
         asphalt = cv2.morphologyEx(asphalt, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
 
         # Brightness relative to the road around it, so tunnels/shadows still work.
@@ -88,12 +92,26 @@ class LaneFinder:
         road_lum = float(np.median(road_px)) if road_px.size > 500 else 70.0
         t = max(16.0, min(45.0, (255 - road_lum) * 0.22))
 
-        white = (S < 90) & (L > road_lum + 14)
+        # white paint: brighter than its surroundings (top-hat) and not grass/yellow.
+        # In shadow, white paint turns light blue, so blue-ish bright pixels count too.
+        grass = (Hh >= 35) & (Hh <= 95) & (Sv > 60)
+        # Brighter than the road right around it (works in sun AND in dark shadow,
+        # where paint is only ~L=110 on ~L=35 road).
+        bg = cv2.morphologyEx(L, cv2.MORPH_OPEN, self.k_bg)
+        local = cv2.subtract(L, bg)
+        white = (((S < 90) | ((Hh >= 95) & (Hh <= 130))) & ~grass & (local > 28))
         yellow = (Hh >= 14) & (Hh <= 34) & (Sv > 70) & (V > 90)
         paint_lane = (((th_h > t) & white) | (yellow & (cv2.morphologyEx(V, cv2.MORPH_TOPHAT, self.k_h) > t * 0.6)))
         paint_hz = (th_v > t) & white
         road = cv2.dilate(asphalt, self.k_road)
-        pl = (paint_lane.astype(np.uint8) * 255) & road
+        # A lane line has road on BOTH sides; a curb / sidewalk edge only on one.
+        sh = self.side_px
+        left_ok = np.zeros_like(asphalt)
+        right_ok = np.zeros_like(asphalt)
+        left_ok[:, sh:] = asphalt[:, :-sh]
+        right_ok[:, :-sh] = asphalt[:, sh:]
+        both = cv2.dilate(left_ok & right_ok, np.ones((5, 3), np.uint8))
+        pl = (paint_lane.astype(np.uint8) * 255) & road & both
         ph = (paint_hz.astype(np.uint8) * 255) & road
         yl = (yellow.astype(np.uint8) * 255) & pl
         wa = (white.astype(np.uint8) * 255) & road     # wide paint too (crosswalk blocks)
@@ -142,7 +160,7 @@ class LaneFinder:
 
     # ------------------------------------------------------------------
     def _trace(self, pts_x: np.ndarray, pts_y: np.ndarray, yel: np.ndarray, start_y: float,
-               prior: LaneLine | None) -> LaneLine | None:
+               prior: LaneLine | None, x_start: float = 4.0) -> LaneLine | None:
         """Follow one line forward from lateral position start_y using sliding windows."""
         win = 0.9
         step = 3.0
@@ -150,7 +168,7 @@ class LaneFinder:
         y_c = start_y
         hits = 0
         n_win = 0
-        x = 4.0
+        x = x_start
         prev_shift = 0.0
         while x < 58:
             n_win += 1
@@ -192,6 +210,19 @@ class LaneFinder:
             occ = np.array([np.any(np.abs(ys_s[a:b] - y) < 0.25) if b > a else False
                             for a, b, y in zip(lo, hi, yq)])
             dashed = bool(0.15 < occ.mean() < 0.75)
+            if dashed:
+                # lane dashes are metres long; crosswalk-ladder ends repeat every ~0.5-1 m
+                runs, cur = [], 0
+                for o in occ:
+                    if o:
+                        cur += 1
+                    elif cur:
+                        runs.append(cur)
+                        cur = 0
+                if cur:
+                    runs.append(cur)
+                if runs and np.median(runs) * 0.5 < 1.2 and len(runs) >= 4:
+                    return None
         else:
             dashed = False
         color = "yellow" if yl.mean() > 0.35 else "white"
@@ -250,27 +281,42 @@ class LaneFinder:
 
         # Start positions: histogram of lateral offsets in the near field
         cands: list[LaneLine] = []
-        near = (px > 4) & (px < 30)   # ego lane paint near the car is often hidden by the car itself
-        if np.count_nonzero(near) > 20:
+        # Start lines from peaks in the near band AND the far band: near paint is often
+        # hidden under the car, and inside a junction the only paint is across it.
+        for lo, hi, far in ((4, 30, False), (22, 58, True)):
+            band = (px > lo) & (px < hi)
+            if np.count_nonzero(band) < 20:
+                continue
             bins = np.arange(-10, 10.01, 0.25)
-            hist, edges = np.histogram(py[near], bins=bins)
+            hist, edges = np.histogram(py[band], bins=bins)
             hist = np.convolve(hist, [1, 2, 3, 2, 1], mode="same")
             peaks = []
             for i in np.argsort(hist)[::-1]:
                 if hist[i] < 8:
                     break
                 yv = (edges[i] + edges[i + 1]) / 2
-                if all(abs(yv - p) > 1.6 for p in peaks):
+                if all(abs(yv - q) > 1.6 for q in peaks):
                     peaks.append(yv)
                 if len(peaks) >= 6:
                     break
             for p in peaks:
+                x0 = 4.0
+                if far:
+                    if any(abs(c.y_at(40) - p) < 0.8 for c in cands):
+                        continue
+                    x0 = 22.0
                 prior = None
                 if self.prev_left and abs(self.prev_left.y_at(6) - p) < 1.0:
                     prior = self.prev_left
                 elif self.prev_right and abs(self.prev_right.y_at(6) - p) < 1.0:
                     prior = self.prev_right
-                line = self._trace(px, py, is_yel, p, prior)
+                if far:
+                    prior = None
+                    start = p
+                    # walk from the far band; fit is then extended back to the car
+                    line = self._trace(px, py, is_yel, start, None, x_start=x0)
+                else:
+                    line = self._trace(px, py, is_yel, p, prior)
                 if line is not None:
                     cands.append(line)
 

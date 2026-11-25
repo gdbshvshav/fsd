@@ -83,6 +83,56 @@ if IS_WIN:
         ctypes.WinDLL("winmm").timeBeginPeriod(1)
     except OSError:
         pass
+    try:  # real pixel coordinates on 4K / scaled displays (otherwise window rects are off)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:  # noqa: BLE001
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:  # noqa: BLE001
+            pass
+
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsIconic.argtypes = [wintypes.HWND]
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def _title(hwnd) -> str:
+        n = user32.GetWindowTextLengthW(hwnd)
+        buf = ctypes.create_unicode_buffer(n + 1)
+        user32.GetWindowTextW(hwnd, buf, n + 1)
+        return buf.value
+
+    def roblox_client_rect() -> tuple[int, int, int, int] | None:
+        """Screen rectangle (x, y, w, h) of the Roblox game area, or None."""
+        found = []
+
+        def cb(hwnd, _):
+            if user32.IsWindowVisible(hwnd) and not user32.IsIconic(hwnd) and _title(hwnd) == "Roblox":
+                found.append(hwnd)
+            return True
+        user32.EnumWindows(WNDENUMPROC(cb), 0)
+        if not found:
+            return None
+        hwnd = found[0]
+        r = wintypes.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(r))
+        pt = wintypes.POINT(0, 0)
+        user32.ClientToScreen(hwnd, ctypes.byref(pt))
+        w, h = r.right - r.left, r.bottom - r.top
+        if w < 200 or h < 200:
+            return None
+        return pt.x, pt.y, w, h
+
+    def window_rect(hwnd) -> tuple[int, int, int, int] | None:
+        r = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(r)):
+            return None
+        return r.left, r.top, r.right - r.left, r.bottom - r.top
 
     def _send(*inputs: "INPUT") -> None:
         arr = (INPUT * len(inputs))(*inputs)
@@ -106,11 +156,7 @@ if IS_WIN:
                                                     MOUSEEVENTF_WHEEL, 0, 0)))
 
     def foreground_title() -> str:
-        hwnd = user32.GetForegroundWindow()
-        n = user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(n + 1)
-        user32.GetWindowTextW(hwnd, buf, n + 1)
-        return buf.value
+        return _title(user32.GetForegroundWindow())
 else:  # ---------------- stubs for Linux/macOS (tests, replays) ----------------
     LOG: list[tuple] = []
 
@@ -131,6 +177,12 @@ else:  # ---------------- stubs for Linux/macOS (tests, replays) ---------------
 
     def foreground_title() -> str:
         return "Roblox"
+
+    def roblox_client_rect():
+        return None
+
+    def window_rect(hwnd):
+        return None
 
 
 def roblox_focused() -> bool:

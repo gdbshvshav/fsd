@@ -33,25 +33,28 @@ class Calibration:
     # Frame size the calibration was made at. Everything scales from this.
     width: int = 1920
     height: int = 1080
-    # Ground trapezoid in the screen (fractions of width/height):
-    # bottom-left, bottom-right, top-right, top-left of a straight lane section.
-    # Defaults fit ER:LC's default chase camera at 1080p; run the calibrator to refine.
+    # Ground trapezoid in the Roblox window (fractions of width/height):
+    # bottom-left, bottom-right, top-right, top-left of your lane, from 1 m to 40 m
+    # ahead of the front bumper. Defaults are measured from a real ER:LC screenshot
+    # (default chase camera); F4 re-measures it for your exact camera.
     src_quad: list = field(default_factory=lambda: [
-        [0.18, 0.93], [0.82, 0.93], [0.565, 0.60], [0.435, 0.60]])
+        [0.4598, 0.5182], [0.5441, 0.5182], [0.5204, 0.3904], [0.4951, 0.3904]])
     # Real-world size of that trapezoid: width (m) at the bottom and depth (m) bottom->top
-    quad_width_m: float = 11.0
-    quad_depth_m: float = 30.0
+    quad_width_m: float = 3.7
+    quad_depth_m: float = 39.0
     # Distance (m) from the car's front bumper to the bottom edge of the trapezoid
-    bumper_to_quad_m: float = 4.0
+    bumper_to_quad_m: float = 1.0
     # Vertical field of view of the game camera (deg). Roblox's default Camera.FieldOfView
     # is 70 and it is VERTICAL. Used for sign/light distances and auto-calibration.
     vfov_deg: float = 70.0
-    # Distance from the game camera to the car's front bumper (chase cam sits behind the car)
-    cam_to_bumper_m: float = 7.0
+    # Distance from the game camera to the car's front bumper (ER:LC's chase cam is high and far back)
+    cam_to_bumper_m: float = 15.75
     # Units printed on ER:LC speed limit signs (US-style map -> mph)
     sign_unit: str = "mph"
-    # Pixels (fractions) of the screen covered by our own car in chase cam: ignored by detectors
-    ego_mask: list = field(default_factory=lambda: [0.33, 0.62, 0.67, 1.0])
+    # Part of the screen covered by YOUR car (x1, y1, x2, y2 fractions). In ER:LC's chase
+    # camera the car sits in the middle of the screen, not at the bottom. Detections there
+    # are ignored, and the box follows your car automatically while driving.
+    ego_mask: list = field(default_factory=lambda: [0.455, 0.47, 0.545, 0.615])
     # Speedometer region (fractions x1,y1,x2,y2). None = auto-find on first drive.
     speedo_roi: list | None = None
     speed_unit: str = "auto"   # "auto" | "kph" | "mph"
@@ -71,7 +74,7 @@ class Settings:
     ui_overlay: bool = False        # True = always use the small floating window, even with 2 screens
     ui_on_top: bool = True          # stay above Roblox
     ui_opacity: float = 0.92        # floating window see-through amount (0.3 - 1.0)
-    ui_size: list = field(default_factory=lambda: [640, 360])   # floating window size (px)
+    ui_size: list = field(default_factory=lambda: [800, 450])   # floating window size (px)
     ui_pos: list | None = None      # floating window position; None = top-right corner
     model_path: str = "models/erlc.pt"   # trained ER:LC model (made by training mode)
     fallback_model: str = "yolo11s.pt"   # COCO model: cars, people, lights, stop signs
