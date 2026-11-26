@@ -298,8 +298,10 @@ class SimRun:
         front_s = self._front_s()
         # a lane change FSD decided on (keep right, merge, wrong side): the new lane is the target
         from ..world import Mode as _Mode
-        if plan.mode == _Mode.LANE_CHANGE:
-            self._lc = True
+        pl = self.planner
+        passing = pl.reverse_left_m > 0 or (pl._passing_lead is not None and self.t - pl._passing_lead[0] < 20.0)
+        if plan.mode == _Mode.LANE_CHANGE or plan.reverse or passing:
+            self._lc = True                 # a manoeuvre FSD chose: leaving the lane is the point
         elif getattr(self, "_lc", False):
             self._lc = False
             self.target_lane = int(np.clip(d // self.road.lane_width, 0, self.road.lanes - 1))

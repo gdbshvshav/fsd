@@ -13,6 +13,8 @@ the acceleration controller.
 """
 from __future__ import annotations
 
+import numpy as np
+
 from ..world import Mode, Plan, World
 from .camera_lag import CameraLag
 from .lane_filter import LaneFilter, filtered
@@ -161,6 +163,10 @@ class Driver:
             strength *= self.yaw.strength.gain
         s = self.lat.step(plan.path, v, self.steer_value, strength, p, dt, now, turning, w.lanes.conf,
                           kmax=self.turning.max_curvature(v, p))
+        if not turning and not plan.lane_change and plan.target_speed_kph < 1.0 and v < 3.0:
+            # stopping / stopped: nothing to steer for, and the lines are often hidden by the car
+            # we stopped behind - keep the wheel straight instead of chasing a guessed lane
+            s = float(np.clip(s, -0.15, 0.15)) * min(1.0, v / 3.0)
         sup = self.sup.update(now, dt, self.lat.geom.e if self.lat.geom.ok else 0.0, s, turning, w.speed_valid,
                               self.lanes.sigma_offset() if self.lanes.ok else 0.0, self.lanes.rejects,
                               self.lat.guard.weaving, self.loop_fps, w.speed_kph)
