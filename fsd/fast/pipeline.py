@@ -31,6 +31,7 @@ from ..perception.ocr import OcrWorker
 from ..perception.signs import STOP_SIGN_H_M, find_speed_sign_crops, find_stop_signs, sign_position
 from ..perception.tracking import EgoMotion, EmergencyDetector, Tracker, iou
 from ..settings import Settings
+from ..perception.visual_odometry import VisualOdometry, hidden_from_box
 from ..world import Obj, World
 from .autocal import AutoCalibrator
 from .lamps import find_lamps
@@ -119,6 +120,7 @@ class FastPerception:
         self.obstacles = ObstacleFinder()
         self.road_model = RoadModel()
         self.yaw_hint: float | None = None          # set by the driving core (not used for shifting here)
+        self.vo = VisualOdometry()                  # speed + turn rate from the road moving under us
         self.ego_shape = EgoShape()
         self.ego_box: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.autocal = AutoCalibrator(self.cal)
@@ -387,6 +389,7 @@ class FastPerception:
 
         # ---- motion, emergency, scene ----
         w.yaw_rate = self.motion.update(frame, geo.horizon_y, t)
+        w.vo = self._visual_odometry(frame, geo, t, w)
         w.emergency_near = self.emerg.update(frame, [o for o in others if o.kind in ("car", "emergency")], t) \
             or any(o.kind == "emergency" and o.x < 60 for o in others)
         small = cv2.resize(frame, (64, 36))
@@ -435,6 +438,15 @@ class FastPerception:
             "cal": dict(cal_fields) if cal_fields else None, "cal_msg": self.autocal.message if cal_fields else "",
             "timings": {**{k: v for k, v in res.timings.items()}, "lanes_total": time.perf_counter() - t_start},
         }
+
+    def _visual_odometry(self, frame, geo, t, w):
+        try:
+            hidden = hidden_from_box(geo, self.ego_box, frame.shape[1])
+            c = w.lanes.center[2] if w.lanes.conf > 0.4 else 0.0
+            prior = w.speed_kph / 3.6 if w.speed_valid else None
+            return self.vo.update(frame, geo, t, hidden, c, v_prior=prior)
+        except Exception:  # noqa: BLE001 - never break perception
+            return None
 
     def _edges(self, frame, res, ego_mask):
         """Road surface edges (works without lane lines)."""

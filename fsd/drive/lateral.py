@@ -212,7 +212,7 @@ class LateralLQR:
         self.guard = WeaveGuard()
 
     def step(self, path, v: float, steer_value: float, strength: float, p, dt: float, t: float,
-             turning: bool = False, conf: float = 1.0) -> float:
+             turning: bool = False, conf: float = 1.0, kmax: float | None = None) -> float:
         """Returns the wanted Roblox steering value (-1..1)."""
         v = max(0.0, v)
         tau = steer_time_constant(p)
@@ -244,7 +244,7 @@ class LateralLQR:
         k_i = -p.get("steer_ki", 0.35) * self.ie / max(v * v, 25.0)
         k = k_ff + u_fb + k_i
         # limits: full lock, and sideways acceleration (not in tight low-speed turns)
-        kmax = max_curvature(v, p) * strength
+        kmax = kmax if kmax is not None else max_curvature(v, p) * strength
         if v > 6.0:
             kmax = min(kmax, p.get("max_lat_accel", 7.0) / (v * v))
         k = float(np.clip(k, -kmax, kmax))

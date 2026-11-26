@@ -91,9 +91,10 @@ class YawFusion:
         self.__init__()
 
     def update(self, t: float, v: float, steer_value: float, p, image_yaw: float | None,
-               lanes=None) -> float:
+               lanes=None, gain: float | None = None) -> float:
         """v in m/s; steer_value = the actuator's estimate of the Roblox steering value."""
-        gain = self.strength.gain if p.get("steer_strength_learn", 0.0) > 0.5 else 1.0
+        if gain is None:
+            gain = self.strength.gain if p.get("steer_strength_learn", 0.0) > 0.5 else 1.0
         k_model = curvature_from_steer(steer_value, v, p) * gain
         self.model = v * k_model
         est = self.model

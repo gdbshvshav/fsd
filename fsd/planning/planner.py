@@ -21,6 +21,7 @@ from .autonomy import Autonomy
 from .lead_memory import LeadMemory
 from .turns import TurnManager
 from ..drive.path_planner import OffsetShaper, edges_path, heading_hold_path
+from ..drive.passing import PassingPlanner
 from ..drive.side_keeper import SideKeeper
 
 KPH = 3.6
@@ -49,6 +50,7 @@ class Planner:
         self.lead_mem = LeadMemory()
         self.auto = Autonomy()
         self.side = SideKeeper()
+        self.passing = PassingPlanner()
         self.side_decision = None
         self.frame = None            # latest work picture (set by the app / sim) for road-end checks
 
@@ -169,7 +171,7 @@ class Planner:
         sd = self.side.update(w.lanes, w.road_edges, w.objects, p, now, v, ts.lane_change or ts.active)
         self.side_decision = sd
         if sd.move_right and ts.pending is None:
-            why = "back to our side" if sd.wrong_side else "keeping right"
+            why = "back to our side" if sd.wrong_side else (sd.reason or "keeping right")
             msg = self.turns.force_lane_change("right", now, self.adjacent_free(w, lane_w).get("right", False), why)
             if msg:
                 plan.alert = msg
@@ -224,8 +226,13 @@ class Planner:
         # ---------- curves: slow down so sideways accel stays comfortable ----------
         curv = abs(w.lanes.curvature)
         if ts.active:
-            target = min(target, p["turn_speed_kph"])
+            target = min(target, p["turn_speed_kph"], (ts.turn_speed * KPH) if ts.turn_speed else 999.0)
             mode, reason = Mode.TURNING, f"turning {ts.pending}"
+        elif ts.pending is not None and ts.junction_d is not None and ts.turn_speed:
+            # approaching a turn: be down to the speed this car can turn at by the turn-in point
+            v_ok = math.sqrt(ts.turn_speed ** 2 + 2 * p["comfort_decel"] * max(0.0, ts.junction_d)) * KPH
+            if v_ok < target:
+                target, reason = v_ok, f"slowing for the {ts.pending} turn"
         elif curv > 1e-3:
             v_curve = math.sqrt(p["curve_lat_accel"] / curv) * KPH
             if v_curve < target:
@@ -340,6 +347,18 @@ class Planner:
                     mode = Mode.FOLLOW
                 reason = f"following car {gap:.0f} m"
             plan.lead = lead
+
+        # ---------- stuck behind a stopped car: go around it (dashed lane line only) ----------
+        pd = self.passing.update(w, lead, now, v, p, ts.lane_change, ts.active, reason)
+        if pd.go and ts.pending is None:
+            msg = self.turns.force_lane_change(pd.go, now, True, "passing a stopped car")
+            if msg:
+                plan.alert = msg
+                self.side.passed_at = now
+        elif pd.message:
+            plan.alert = pd.message
+        if pd.waiting_for and lead is not None and v < 1.0:
+            reason = f"{reason} · {pd.waiting_for}"
 
         # ---------- emergency vehicles ----------
         if w.emergency_near:

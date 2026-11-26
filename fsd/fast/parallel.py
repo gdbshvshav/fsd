@@ -36,6 +36,7 @@ from ..perception.lights import SignalTracker
 from ..perception.signs import STOP_SIGN_H_M, find_speed_sign_crops, sign_position
 from ..perception.tracking import EgoMotion, EmergencyDetector, Tracker
 from ..settings import Settings
+from ..perception.visual_odometry import VisualOdometry, hidden_from_box
 from ..world import Lanes, LaneLine, Obj, World
 from .pipeline import Rate
 
@@ -226,6 +227,7 @@ class ParallelPerception:
         self.lane_ms = 0.0
         self.lag_ms = 0.0
         self.yaw_hint: float | None = None
+        self.vo = VisualOdometry()
         self.frame_id = 0
         self.ring: FrameRing | None = None
         self.procs: list[mp.Process] = []
@@ -450,6 +452,15 @@ class ParallelPerception:
                 self.last_screen.masks = _Masks(paint.astype(np.uint8))
         else:
             w.lanes = Lanes()
+
+        # ---- speed + turn rate from the road moving under us (every frame, ~1 ms) ----
+        try:
+            hidden = hidden_from_box(geo, self.ego_box, frame.shape[1])
+            c = w.lanes.center[2] if w.lanes.conf > 0.4 else 0.0
+            w.vo = self.vo.update(frame, geo, t, hidden, c,
+                                  v_prior=w.speed_kph / 3.6 if w.speed_valid else None)
+        except Exception:  # noqa: BLE001
+            w.vo = None
 
         # ---- objects: lights, signs (worker) + free-space obstacles (lane worker) ----
         lights, others = [], []

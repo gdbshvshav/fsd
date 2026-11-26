@@ -13,6 +13,8 @@ fix for "it still thinks it's going 25 when it's at 200".
 """
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 
 from .vehicle_model import PedalMap
@@ -21,6 +23,13 @@ KPH = 3.6
 
 
 class SpeedEstimator:
+    """Speedometer + pedal model + VISUAL speed (road moving under the car, every frame).
+
+    The visual speed is what fixes the lag: it changes the same frame the car speeds up.
+    It is used once it's steady (several frames agreeing), scaled by a factor learned
+    against fresh speedometer readings, and it wins over a speedometer reading that has
+    stopped changing while the road clearly says otherwise."""
+
     def __init__(self):
         self.v = 0.0
         self.ok = False
@@ -30,9 +39,64 @@ class SpeedEstimator:
         self.pending = None
         self.pending_n = 0
         self.var = 25.0
+        self.vis: deque = deque(maxlen=40)      # (t, v_visual_raw, conf)
+        self.vis_scale = 1.0
+        self.vis_scale_n = 0
+        self.vis_used = False
+        self.last_change_t = -1e9
 
     def reset(self) -> None:
         self.__init__()
+
+    def update_visual(self, t: float, v_raw: float | None, conf: float, p=None) -> float:
+        """Feed the visual odometry result (raw m/s). Returns the estimate."""
+        self.vis_used = False
+        if v_raw is None or conf < 0.15:
+            return self.v
+        self.vis.append((t, v_raw, conf))
+        recent = [(tt, v, c) for tt, v, c in self.vis if t - tt <= 0.35]
+        if len(recent) < 5:
+            return self.v
+        vs = np.array([v for _, v, _ in recent])
+        med = float(np.median(vs))
+        mad = float(np.median(np.abs(vs - med)))
+        if mad > 1.2 + 0.05 * abs(med):
+            return self.v                          # not steady enough this moment
+        z = med * self.vis_scale
+        if not self.ok:
+            return self.v
+        stale = t - self.last_change_t > 0.5
+        r = (0.9 if self.vis_scale_n >= 15 else 2.5) ** 2
+        if stale and abs(z - self.v) > 3.0:
+            r *= 0.3                               # the speedometer is stuck: believe the road
+        innov = z - self.v
+        if not stale and abs(innov) > 5.0 * np.sqrt(self.var + r) + 4.0:
+            return self.v
+        k = self.var / (self.var + r)
+        self.v = max(0.0, self.v + k * innov)
+        self.var *= (1 - k)
+        self.vis_used = True
+        return self.v
+
+    def vis_used_recent(self, t: float) -> bool:
+        return bool(self.vis) and t - self.vis[-1][0] < 0.2 and self.vis_scale_n >= 10
+
+    def learn_visual_scale(self, t: float, v_speedo: float, accel: float) -> None:
+        """A fresh speedometer reading while not accelerating hard: compare with the road."""
+        if t - self.last_change_t > 0.15 or abs(accel) > 1.5 or v_speedo < 5.0:
+            return
+        recent = [v for tt, v, c in self.vis if t - tt <= 0.25 and c > 0.25]
+        if len(recent) < 4:
+            return
+        med = float(np.median(recent))
+        if med < 3.0:
+            return
+        ratio = v_speedo / med
+        if not 0.5 < ratio < 2.0:
+            return
+        self.vis_scale_n += 1
+        k = 1.0 / min(self.vis_scale_n + 1, 50)
+        self.vis_scale = float(np.clip((1 - k) * self.vis_scale + k * ratio, 0.5, 2.0))
 
     def predict(self, t: float, a_expected: float) -> None:
         if self.t is None:
@@ -49,9 +113,14 @@ class SpeedEstimator:
             if t - self.last_meas_t > 1.5:
                 self.var = max(self.var, 9.0)
             return self.v
-        if v_meas == self.last_meas and t - self.last_meas_t < 0.4:
-            # same reading again: the screen hasn't changed (or OCR is slow) - weak update
-            r = 4.0
+        if v_meas == self.last_meas:
+            # same reading again: the screen hasn't changed - or OCR is slow / stuck. The longer
+            # it stays the same, the less it's worth (a real car's speed is never exactly constant
+            # for long while the pedals are working)
+            stale = t - self.last_change_t
+            r = 4.0 + (0.0 if stale < 0.4 else 60.0 * (stale - 0.4))
+            if self.vis_used_recent(t):
+                r *= 4.0
         else:
             r = 0.6
         if not self.ok:
@@ -77,6 +146,7 @@ class SpeedEstimator:
                 self.pending, self.pending_n = None, 0
         if v_meas != self.last_meas:
             self.last_meas_t = t
+            self.last_change_t = t
         self.last_meas = v_meas
         self.v = max(0.0, self.v)
         return self.v

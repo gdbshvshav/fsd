@@ -21,6 +21,7 @@ from .longitudinal import LongitudinalController
 from .speed_planner import SpeedPlanner
 from .supervisor import Supervisor
 from .telemetry import Telemetry
+from .turning import CamYaw, TurningModel
 from .yaw import YawFusion
 
 KPH = 3.6
@@ -36,6 +37,10 @@ class Driver:
         self.tel = Telemetry()
         self.sup = Supervisor()
         self.camlag = CameraLag()
+        self.turning = TurningModel()          # this car's real steering / turning radius
+        self.camyaw = CamYaw()
+        self.vo_yaw: float | None = None
+        self._p = None
         self.loop_fps: float | None = None          # set by the app
         self.raw_speed_kph = 0.0
         self.raw_yaw = 0.0
@@ -56,6 +61,7 @@ class Driver:
 
     # ------------------------------------------------------------------
     def sense(self, w: World, p, now: float, steer_value: float, lanes_key=None) -> World:
+        self._p = p
         self.steer_value = steer_value
         # speed: predict with the pedal we sent, correct with the speedometer
         sp = self.lon.speed
@@ -63,13 +69,33 @@ class Driver:
         sp.predict(now, a_exp)
         self.raw_speed_kph = w.speed_kph
         v = sp.update(now, w.speed_kph / KPH if w.speed_valid else None, w.speed_valid)
+        vo = getattr(w, "vo", None)
+        if vo is not None and getattr(vo, "ok", False) and p.get("visual_speed", 1.0) > 0.5:
+            sp.learn_visual_scale(now, v, a_exp)
+            v = sp.update_visual(now, vo.v_raw, vo.conf, p)
         if sp.ok and w.speed_valid:
             w.speed_kph = v * KPH
+        elif sp.ok and sp.vis_used and sp.vis_scale_n >= 15:
+            # speedometer unreadable right now, but the road says how fast we go
+            w.speed_kph = v * KPH
+            w.speed_valid = True
         self.lon.map.observe(now, v, self.last_pedal, valid=w.speed_valid)
         # yaw
         self.raw_yaw = w.yaw_rate
         v = w.speed_kph / KPH
-        w.yaw_rate = self.yaw.update(now, v, steer_value, p, self.raw_yaw, self.lanes.lanes(now) if self.lanes.ok else w.lanes)
+        # the road under the car turning (visual odometry) is a much better "picture yaw" than the
+        # horizon band; undo the chase camera's lag on it
+        vo = getattr(w, "vo", None)
+        self.vo_yaw = None
+        if vo is not None and getattr(vo, "ok", False):
+            self.vo_yaw = self.camyaw.update(now, vo.yaw, vo.conf, self.camlag.tau(p))
+        img_yaw = self.vo_yaw if self.vo_yaw is not None else self.raw_yaw
+        gain = self.turning.strength(v)
+        w.yaw_rate = self.yaw.update(now, v, steer_value, p, img_yaw,
+                                     self.lanes.lanes(now) if self.lanes.ok else w.lanes, gain=gain)
+        # learn this car's real turning (independent measurements only: lanes, then the road)
+        meas = self.yaw.lane_yaw if self.yaw.lane_yaw is not None else self.vo_yaw
+        self.turning.observe(now, v, steer_value, meas, p)
         # junction crossing: stop bar / crosswalk just ahead -> the lines will vanish for a while
         if min(w.stop_line_dist, w.crosswalk_dist) < 14.0:
             self.junction_until = now + float(min(7.0, 45.0 / max(v, 3.0)))
@@ -103,8 +129,11 @@ class Driver:
         # ---- steering ----
         # (the lane filter's yaw-bias state already absorbs a car that steers weaker/stronger than
         # the model; a learned strength factor on top fought it, so it's only used if asked for)
-        strength = self.yaw.strength.gain if p.get("steer_strength_learn", 0.0) > 0.5 else 1.0
-        s = self.lat.step(plan.path, v, self.steer_value, strength, p, dt, now, turning, w.lanes.conf)
+        strength = self.turning.strength(v)
+        if p.get("steer_strength_learn", 0.0) > 0.5:
+            strength *= self.yaw.strength.gain
+        s = self.lat.step(plan.path, v, self.steer_value, strength, p, dt, now, turning, w.lanes.conf,
+                          kmax=self.turning.max_curvature(v, p))
         sup = self.sup.update(now, dt, self.lat.geom.e if self.lat.geom.ok else 0.0, s, turning, w.speed_valid,
                               self.lanes.sigma_offset() if self.lanes.ok else 0.0, self.lanes.rejects,
                               self.lat.guard.weaving, self.loop_fps, w.speed_kph)
@@ -129,9 +158,35 @@ class Driver:
         self.tel.add_act(now, plan, s, pedal, self.debug)
         return s, pedal
 
+    # ------------------------------------------------------------------ what it learned
+    def learned(self) -> dict:
+        """What's worth keeping between sessions (per vehicle): camera lag, pedal response."""
+        return {"cam_lag": self.camlag.tau_learned, "cam_lag_n": self.camlag.samples,
+                "pedal": [(b.full, b.coast, b.brake, b.n_full, b.n_coast, b.n_brake) for b in self.lon.map.bands],
+                "lane_width": self.lanes.width, "turning": self.turning.to_dict()}
+
+    def restore(self, d: dict) -> None:
+        if not d:
+            return
+        try:
+            if d.get("cam_lag") is not None:
+                self.camlag.tau_learned = float(d["cam_lag"])
+                self.camlag.samples = int(d.get("cam_lag_n", 0))
+            for b, row in zip(self.lon.map.bands, d.get("pedal", [])):
+                b.full, b.coast, b.brake = float(row[0]), float(row[1]), float(row[2])
+                b.n_full, b.n_coast, b.n_brake = (min(int(x), 6) for x in row[3:6])
+            if d.get("turning"):
+                self.turning.from_dict(d["turning"])
+            if d.get("lane_width"):
+                self.lanes.width = float(d["lane_width"])
+        except (TypeError, ValueError, IndexError):
+            pass
+
     def status(self) -> dict:
         d = self.debug
         return {"drive_e": d.get("e", 0.0), "drive_soft": d.get("soft", 1.0), "drive_weave": d.get("weave", False),
                 "drive_limit": d.get("limit", ""), "drive_v_target": d.get("v_target", 0.0),
                 "drive_strength": d.get("strength", 1.0), "pedal_map": self.lon.map.summary(),
-                "cam_lag": self.camlag.tau_learned}
+                "cam_lag": self.camlag.tau_learned,
+                "min_radius_town": self.turning.min_radius(5.0, self._p) if self._p else None,
+                "visual_speed": self.lon.speed.vis_used}

@@ -155,6 +155,7 @@ class SimRun:
         self.lon = SpeedController()
         from ..drive.driver import Driver
         self.driver = Driver()
+        self.planner.turns.model = self.driver.turning
         self.keys = KeyModulator(self.p["steer_rise_per_s"], self.p["steer_return_per_s"])
         self.keys.dt = self.dt / self.sub
         self.video = None

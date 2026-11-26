@@ -272,6 +272,8 @@ class Dashboard:
             self.show_camera = not self.show_camera
         if ev.key == pygame.K_m:
             self.show_minimap = not self.show_minimap
+        if ev.key == pygame.K_r:
+            self.show_sides = not getattr(self, "show_sides", True)
         if ev.key == pygame.K_v:
             self.view = "3d" if self.view == "camera" else "camera"
             self.app.want_debug_img = self.view == "3d"
@@ -355,6 +357,14 @@ class Dashboard:
                 keep = (p[:, 1] > geo.horizon_y + 1) & (p[:, 1] < ph)
                 p = p[keep]
                 return np.stack([p[:, 0] * sx, p[:, 1] * sy], 1).astype(np.int32)
+
+            # which side of the road is ours (blue) and which is oncoming (red)
+            if getattr(self, "show_sides", True):
+                from .road_overlay import draw_road_sides
+                try:
+                    draw_road_sides(out, w, to_view)
+                except Exception:  # noqa: BLE001 - never break the view
+                    pass
 
             # planned path: a faint blue carpet on the grey road
             if plan is not None and plan.path and plan.mode.value != "off":
@@ -445,7 +455,7 @@ class Dashboard:
         q = ""
         if st.get("drive_weave"):
             q = " · softening steering (weave)"
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map   {st.get('fps', 0):.0f} fps{lanes}"
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map · R sides   {st.get('fps', 0):.0f} fps{lanes}"
                 f" · lights {st.get('lights_fps', 0):.0f}/s · v{st.get('params', 0)}{q}")
         if st.get("warn"):
             keys = st["warn"] + " · " + keys

@@ -378,3 +378,118 @@ def test_lane_filter_learns_yaw_bias():
         t += 1 / 60
     assert abs(f.yaw_bias - 0.1) < 0.03
     assert abs(f.lanes(t).heading) < 0.02
+
+
+def test_passing_waits_then_goes_left_only_over_dashed_white():
+    from fsd.drive.passing import PassingPlanner
+    from fsd.world import World
+    pp = PassingPlanner()
+    w = World(speed_kph=0.0, speed_valid=True)
+    w.lanes = lanes(c=0.0)
+    w.lanes.left = LaneLine((0, 0, -1.85), 40, "white", True, 0.8)
+    car = Obj("obstacle", (0, 0, 1, 1), 0.9, x=9.0, y=0.0)
+    car.vx = 0.0
+    w.objects = [car]
+    assert pp.update(w, car, 0.0, 0.0, P, False, False).go is None          # just stopped: wait
+    assert pp.update(w, car, 4.5, 0.0, P, False, False).go == "left"
+    # yellow centre line on the left: ask, don't cross
+    pp = PassingPlanner()
+    w.lanes.left = LaneLine((0, 0, -1.85), 40, "yellow", False, 0.8)
+    pp.update(w, car, 0.0, 0.0, P, False, False)
+    d = pp.update(w, car, 5.0, 0.0, P, False, False)
+    assert d.go is None and "press Q" in d.message
+    # at a red light: never
+    pp = PassingPlanner()
+    w.lanes.left = LaneLine((0, 0, -1.85), 40, "white", True, 0.8)
+    from fsd.world import Light
+    w.signal.state = Light.RED
+    w.signal.distance = 20.0
+    pp.update(w, car, 0.0, 0.0, P, False, False)
+    assert pp.update(w, car, 20.0, 0.0, P, False, False).go is None
+
+
+def test_driver_learned_values_roundtrip():
+    from fsd.drive.driver import Driver
+    d = Driver()
+    d.camlag.tau_learned = 0.42
+    d.lon.map.bands[3].full = 2.2
+    d2 = Driver()
+    d2.restore(d.learned())
+    assert d2.camlag.tau_learned == 0.42 and d2.lon.map.bands[3].full == 2.2
+    d2.restore({"pedal": "garbage"})                 # never crashes on a bad file
+
+
+def test_visual_speed_beats_a_stuck_speedometer():
+    """Accelerating 25 -> 150 km/h while the speedometer reading is stuck at 25 (slow OCR):
+    the road moving under the car keeps the estimate current."""
+    e = SpeedEstimator()
+    t = 0.0
+    v_true = 25 / 3.6
+    e.predict(t, 0.0)
+    e.update(t, v_true, True)
+    for _ in range(40):                            # learn the visual scale while cruising
+        t += 1 / 60
+        e.predict(t, 0.0)
+        e.update(t, v_true + (0.1 if int(t * 60) % 2 else 0.0), True)
+        e.update_visual(t, v_true / 1.1, 0.6)      # camera calibration reads 10% slow
+        e.learn_visual_scale(t, e.v, 0.0)
+    for i in range(240):                           # 4 s at +8.7 m/s^2
+        t += 1 / 60
+        v_true += 8.7 / 60
+        e.predict(t, 2.0)                          # the pedal model under-predicts
+        e.update(t, 25 / 3.6, True)                # stuck reading
+        e.update_visual(t, v_true / 1.1, 0.6)
+    assert abs(e.v - v_true) < 4.0, (e.v * 3.6, v_true * 3.6)
+
+
+def test_turning_model_learns_a_wide_car_and_plans_turns_for_it():
+    from fsd.drive.turning import TurningModel
+    tm = TurningModel()
+    # a bus: really turns only 60% as tight as the default model says
+    t = 0.0
+    for rep in range(12):
+        for i in range(50):
+            v = 5.0
+            s = 0.8
+            yaw_true = v * curvature_from_steer(s, v, P) * 0.6
+            tm.observe(t, v, s, yaw_true, P)
+            t += 1 / 60
+        t += 1.0
+    assert abs(tm.strength(5.0) - 0.6) < 0.08
+    r_bus = tm.min_radius(5.0, P)
+    r_car = TurningModel().min_radius(5.0, P)
+    assert r_bus > r_car * 1.5
+    # a 9 m right turn: the bus must go slower and/or wider, and start turning earlier
+    plan = tm.turn_plan(9.0, 10.0, P)
+    assert plan.limited_by == "lock" and (plan.radius > 9.0 or plan.speed < P["turn_speed_kph"] / 3.6)
+    if plan.radius > 9.0:
+        assert plan.entry_offset > 0
+    # a normal car makes it as planned
+    ok = TurningModel().turn_plan(15.0, 10.0, P)
+    assert ok.radius == 15.0 and ok.entry_offset == 0.0
+
+
+def test_turning_model_ignores_unsteady_steering():
+    from fsd.drive.turning import TurningModel
+    tm = TurningModel()
+    t = 0.0
+    for i in range(300):
+        s = 0.8 * math.sin(i / 5)                 # sawing at the wheel: no steady state
+        tm.observe(t, 5.0, s, 0.3, P)
+        t += 1 / 60
+    assert all(n == 0 for n in tm.n)
+
+
+def test_cam_yaw_undoes_camera_lag():
+    from fsd.drive.turning import CamYaw
+    cy = CamYaw()
+    tau, t, cam = 0.25, 0.0, 0.0
+    out = None
+    for i in range(120):                          # car steps to 0.5 rad/s; camera lags
+        car = 0.5
+        cam += (car - cam) * (1 / 60) / tau
+        out = cy.update(t, cam, 0.8, tau)
+        t += 1 / 60
+        if i == 20:
+            early = out
+    assert early > cam * 0.0 and abs(out - 0.5) < 0.05

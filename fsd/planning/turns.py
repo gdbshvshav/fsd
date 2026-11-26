@@ -30,6 +30,9 @@ class TurnState:
     lc_dir: int = 0
     message: str = ""
     preview: list = field(default_factory=list)
+    radius: float = 0.0               # radius this car will actually drive for the turn (m)
+    turn_speed: float = 0.0           # m/s to be at when the turn starts (lock + grip)
+    limited_by: str = ""
 
 
 def arc_path(d_entry: float, radius: float, direction: str, n: int = 30, straight_after: float = 15.0,
@@ -92,6 +95,17 @@ class TurnManager:
         self.s = TurnState()
 
     # ---- per-frame ----
+    model = None          # drive.turning.TurningModel (set by the app/simulator): this car's real lock
+
+    def plan_turn(self, p, v: float):
+        """(radius, speed m/s, how much earlier to start, what limits it) for the pending turn."""
+        st = self.s
+        wanted = p["turn_right_radius_m"] if st.pending == "right" else p["turn_left_radius_m"]
+        if self.model is None:
+            return wanted, p["turn_speed_kph"] / 3.6, 0.0, "junction"
+        tp = self.model.turn_plan(wanted, v, p)
+        return tp.radius, tp.speed, tp.entry_offset, tp.limited_by
+
     def update(self, w, p, dt: float, now: float, adjacent_free: dict[str, bool]) -> None:
         st = self.s
         if st.pending is None:
@@ -104,7 +118,7 @@ class TurnManager:
 
         if st.active:
             # integrate yaw: prefer camera motion, fall back to the geometry of the arc
-            radius = p["turn_right_radius_m"] if st.pending == "right" else p["turn_left_radius_m"]
+            radius = st.radius or (p["turn_right_radius_m"] if st.pending == "right" else p["turn_left_radius_m"])
             yaw = abs(w.yaw_rate) if abs(w.yaw_rate) > 0.02 else v / radius
             st.yaw_done += yaw * dt
             straight_again = w.lanes.conf > 0.45 and abs(w.lanes.heading) < math.radians(12)
@@ -134,11 +148,14 @@ class TurnManager:
             st.junction_d -= v * dt                      # dead-reckon once paint is under the car
 
         if st.junction_d is not None and st.junction_d < p["turn_preview_m"]:
-            radius = p["turn_right_radius_m"] if st.pending == "right" else p["turn_left_radius_m"]
-            entry = st.junction_d + p["turn_entry_m"] + (p["lane_width_m"] if st.pending == "left" else 0.0)
+            radius, v_turn, early, why = self.plan_turn(p, v)
+            st.radius, st.turn_speed, st.limited_by = radius, v_turn, why
+            # a car that can't turn as tight as the junction wants starts its turn earlier
+            entry = st.junction_d + p["turn_entry_m"] + (p["lane_width_m"] if st.pending == "left" else 0.0) - early
             st.preview = arc_path(max(0.0, entry), radius, st.pending)
-            st.message = f"Turning {st.pending} at the junction in {max(0, st.junction_d):.0f} m"
-            if st.junction_d + p["turn_entry_m"] + (p["lane_width_m"] if st.pending == "left" else 0) <= 0.5:
+            extra = f" (wide car: {radius:.0f} m radius, {v_turn * 3.6:.0f} km/h)" if why == "lock" else ""
+            st.message = f"Turning {st.pending} at the junction in {max(0, st.junction_d):.0f} m{extra}"
+            if entry <= 0.5:
                 st.active = True
                 st.started = now
                 st.yaw_done = 0.0
@@ -166,7 +183,7 @@ class TurnManager:
         st = self.s
         if not st.active:
             return None
-        radius = p["turn_right_radius_m"] if st.pending == "right" else p["turn_left_radius_m"]
+        radius = st.radius or (p["turn_right_radius_m"] if st.pending == "right" else p["turn_left_radius_m"])
         remaining = max(0.05, math.pi / 2 - st.yaw_done)
         return arc_path(0.0, radius, st.pending, angle=remaining)
 

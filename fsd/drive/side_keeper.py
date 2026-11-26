@@ -34,6 +34,7 @@ class SideKeeper:
         self.last = SideDecision()
         self.advice = SideAdvice()
         self._last_request = -1e9
+        self.passed_at = -1e9            # set by the planner when we pulled out to pass
 
     def reset(self) -> None:
         self.__init__()
@@ -58,6 +59,17 @@ class SideKeeper:
         if adv.target_offset is not None and lanes.conf < 0.35 and not adv.wrong_side:
             d.no_lines_offset = adv.target_offset
             d.reason = d.reason or adv.reason
+        # after going around a stopped car (any speed): back to the right lane once it's behind us
+        if 6.0 < now - self.passed_at < 40.0 and lanes.conf > 0.5 and not lane_change_active:
+            R = lanes.right
+            if R is not None and R.dashed and R.color == "white":
+                clear = not any(o.kind in ("car", "emergency", "obstacle") and -12 < o.x < 40
+                                and 0.5 * lanes.width_m < o.y - lanes.offset < 1.6 * lanes.width_m for o in objects)
+                if clear and now - self._last_request > 5.0:
+                    d.move_right = True
+                    d.reason = "back to the right lane after passing"
+                    self._last_request = now
+                    self.passed_at = -1e9
         # keep right except to pass
         if p.get("keep_right", 1.0) > 0.5 and v > 70 / 3.6 and lanes.conf > 0.5 and not lane_change_active:
             R = lanes.right

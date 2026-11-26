@@ -89,6 +89,8 @@ class App:
         self.lat = LateralController()
         self.lon = SpeedController()
         self.driver = Driver()
+        self.planner.turns.model = self.driver.turning
+        self._load_learned()
         self.actuator = Actuator()
         self.camera = CameraAim()
         self.recorder = Recorder()
@@ -128,6 +130,26 @@ class App:
         self.inputs = InputMonitor(handlers, self._driver_key)
 
     # ------------------------------------------------------------------ hotkeys
+    # ------------------------------------------------------------------ learned driving values
+    def _learned_path(self):
+        return _ROOT / "data" / "learned" / f"drive_{self.store.vehicle or 'default'}.json"
+
+    def _load_learned(self) -> None:
+        import json
+        try:
+            self.driver.restore(json.loads(self._learned_path().read_text()))
+        except (OSError, ValueError):
+            pass
+
+    def _save_learned(self) -> None:
+        import json
+        try:
+            path = self._learned_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self.driver.learned(), indent=1))
+        except (OSError, TypeError, ValueError):
+            pass
+
     def toggle_engage(self) -> None:
         if self.engaged:
             self.disengage("F1")
@@ -155,10 +177,20 @@ class App:
         speed = self._snap.world.speed_kph if self._snap.world else 0.0
         self.learner.say(f"Disengaged ({why})")
         plan = self._snap.plan
+        self._save_learned()
+        q = self.driver.tel.quality(60.0)
+        fields = [("Speed", f"{speed:.0f} kph", True),
+                  ("Was doing", f"{plan.mode.value}: {plan.reason}" if plan else "-", True)]
+        if q:
+            fields += [("Lane error (last 60 s)", f"avg {q['lat_err_mean']:.2f} m · max {q['lat_err_max']:.2f} m", True),
+                       ("Steering reversals", f"{q['steer_reversals_per_s']:.1f}/s", True),
+                       ("Lanes lost", f"{q['lane_dropout'] * 100:.0f}% of the time", True)]
+        st = self.driver.status()
+        if st.get("cam_lag") is not None:
+            fields.append(("Camera lag learned", f"{st['cam_lag']:.2f} s", True))
+        fields.append(("Pedal map", st.get("pedal_map", "default")[:200], False))
         discord().embed(f"Disengaged: {why}", "Saving the last 30 s for review." if (why == "takeover" or speed > 5)
-                        else "", ORANGE if why != "F1" else GREY, [
-            ("Speed", f"{speed:.0f} kph", True),
-            ("Was doing", f"{plan.mode.value}: {plan.reason}" if plan else "-", True)])
+                        else "", ORANGE if why != "F1" else GREY, fields)
         q = self.driver.tel.quality()
         if q:
             self.learner.say(f"Last 20 s: lane error avg {q['lat_err_mean']:.2f} m, max {q['lat_err_max']:.2f} m, "

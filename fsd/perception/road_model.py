@@ -61,19 +61,32 @@ class RoadColour:
         self.n = 0
 
     def learn(self, lab: np.ndarray, hsv: np.ndarray) -> None:
-        shadow = (hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 2] < 130)
+        """Robust colour statistics (median / MAD) of the road just ahead. Paint that slipped
+        through the paint mask (anti-aliased edges of a yellow or white line) is dropped first,
+        and the spread is capped - one stripe of yellow in the sample must not make the whole
+        world look like road."""
+        lab = lab.reshape(-1, 3)
+        hsv = hsv.reshape(-1, 3)
+        paintlike = ((hsv[:, 1] > 70) & (hsv[:, 0] >= 15) & (hsv[:, 0] <= 40)) | \
+                    ((hsv[:, 2] > 185) & (hsv[:, 1] < 50))
+        lab = lab[~paintlike]
+        hsv = hsv[~paintlike]
+        shadow = (hsv[:, 0] >= 95) & (hsv[:, 0] <= 130) & (hsv[:, 2] < 130)
         for name, sel in (("sun", ~shadow), ("shade", shadow)):
-            px = lab[sel]
+            px = lab[sel].astype(np.float64)
             if len(px) < 30:
                 continue
-            m = px.mean(0)
-            s = px.std(0) + np.array([5.0, 2.5, 2.5])
+            m = np.median(px, axis=0)
+            mad = np.median(np.abs(px - m), axis=0) * 1.4826
+            sd = np.clip(mad, [2.0, 1.0, 1.0], [12.0, 5.0, 5.0]) + np.array([4.0, 2.0, 2.0])
             cur = getattr(self, name)
-            setattr(self, name, (m, s) if cur is None else (0.9 * cur[0] + 0.1 * m, 0.9 * cur[1] + 0.1 * s))
+            setattr(self, name, (m, sd) if cur is None else (0.9 * cur[0] + 0.1 * m, 0.9 * cur[1] + 0.1 * sd))
         self.n += 1
 
     def mask(self, lab: np.ndarray, hsv: np.ndarray, k: float = 3.0) -> np.ndarray:
-        out = (hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 2] < 125) & (hsv[:, :, 1] > 55)
+        # (unlike the obstacle finder, shadows are NOT assumed to be road here: tree shadows on
+        # grass are just as blue, and they'd move the road edge onto the verge)
+        out = np.zeros(lab.shape[:2], bool)
         for cur in (self.sun, self.shade):
             if cur is None:
                 continue
@@ -85,7 +98,7 @@ class RoadColour:
 
 
 class RoadModel:
-    def __init__(self, n_rows: int = 26, max_gap_m: float = 0.9):
+    def __init__(self, n_rows: int = 26, max_gap_m: float = 0.5):
         self.colour = RoadColour()
         self.n_rows = n_rows
         self.max_gap_m = max_gap_m
@@ -156,7 +169,7 @@ class RoadModel:
         if self.colour.n < 3:
             self.edges = RoadEdges()
             return self.edges
-        road = self.colour.mask(lab, hsv)
+        road = self.colour.mask(lab, hsv, k=2.5)
         if paint is not None:
             road |= paint[ys] > 0                          # paint is part of the road
         road |= ~okpix                                     # hidden by our car: assume road

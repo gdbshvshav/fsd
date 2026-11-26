@@ -86,7 +86,8 @@ class World:
     extra_hidden_m: float = 0.0     # the first metres of our lane hidden behind our own car on screen
     lanes_t: float = 0.0            # when the lane detection used here was taken (perception time)
     lane_switch: int = 0            # +1/-1: this frame our lane became the one to the right/left
-    road_edges: object = None       # perception.road_model.RoadEdges: where the road surface ends
+    road_edges: object = None
+    vo: object = None               # perception.visual_odometry.VOResult (speed / turn from the road)       # perception.road_model.RoadEdges: where the road surface ends
     timings: dict = field(default_factory=dict)
 
 
