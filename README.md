@@ -96,6 +96,21 @@ offset start, red light, light cycling while approaching, stop sign, power outag
 (flashing red), lead car braking hard, parked car in the lane, heavy truck on bends,
 tight town bend, and starting with the wrong calibration.
 
+## Driving the REAL Liberty County map
+
+The simulator can also drive the actual ER:LC map: every part, mesh and the terrain
+from erlc-tools.com's 3D map export, drawn from the chase camera with OpenGL
+(your graphics card; any GPU works). The map is downloaded once into `data/erlc_map/`
+(it isn't stored in this repo - it's their work). Scoring uses the map's own lane paint.
+
+```
+.venv\Scripts\pip install -r requirements-sim.txt     # once: moderngl + meshoptimizer
+python -m fsd.sim.erlc list
+python -m fsd.sim.erlc run all
+python -m fsd.sim.erlc run town_south_north --video out --verbose
+python -m fsd.sim.erlc shot highway_east --out view.png
+```
+
 ## How it drives (short version)
 
 - **Steering**: Roblox keyboard steering isn't an angle - holding A/D moves a hidden

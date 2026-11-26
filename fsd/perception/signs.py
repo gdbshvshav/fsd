@@ -103,8 +103,15 @@ def find_stop_signs(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
             gx0, gy0, gx1, gy1 = x, y + y0, x + w, y + h + y0
         if score is None:
             continue
-        if w < 14 * (1 / kf if fine is not None else 1) and gy1 < horizon_y - H * 0.12:
-            continue                                     # tiny and floating high in the sky
+        if w < 14 * (1 / kf if fine is not None else 1):
+            if gy1 < horizon_y - H * 0.12:
+                continue                                 # tiny and floating high in the sky
+            # a sign stands alone on a pole; red autumn leaves come in clusters of blobs
+            pad = 2 * max(w, h)
+            ax0, ay0 = max(0, x - pad), max(0, y - pad)
+            around = red[ay0:y + h + pad, ax0:x + w + pad]
+            if cv2.countNonZero(around) > 2.2 * a:
+                continue
         k = scale_to
         out.append(Obj("stop_sign", (int(gx0 * k), int(gy0 * k), int(gx1 * k), int(gy1 * k)),
                        float(min(0.9, score))))
