@@ -83,9 +83,39 @@ def instances_from_bin(buf: bytes, meta: dict) -> MeshInstances:
                          list(meta["materials"]), r[:, 16].astype(np.int32) if h > 16 else None)
 
 
+def texture_means(meta: dict, season_parts: str, season_shapes: str, log=print) -> list | None:
+    """Average colour of every mesh texture (sRGB 0..255 + % opaque), cached. Without the
+    textures, textured meshes (signs, trees, building fronts) would all come out white."""
+    path = CACHE / f"texmean_{season_parts}.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    import cv2
+    out = []
+    log("Measuring map texture colours (once) ...")
+    for t in meta.get("textures", []):
+        base = f"{BASE_URL}/{season_parts if t.get('own') else season_shapes}/tex/{t['id']}.webp"
+        try:
+            buf = np.frombuffer(_get(base), np.uint8)
+            img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+            small = cv2.resize(img, (16, 16), interpolation=cv2.INTER_AREA)
+            if small.ndim == 3 and small.shape[2] == 4:
+                ok = small[:, :, 3] >= 100
+                px = small[:, :, :3][ok]
+            else:
+                ok = np.ones(small.shape[:2], bool)
+                px = small.reshape(-1, small.shape[2] if small.ndim == 3 else 1)[:, :3]
+            m = px.mean(0)[::-1] if len(px) else np.zeros(3)
+            out.append([int(m[0]), int(m[1]), int(m[2]), int(100 * ok.mean())])
+        except Exception:  # noqa: BLE001
+            out.append(None)
+    path.write_text(json.dumps(out))
+    return out
+
+
 class MapMeshes:
-    def __init__(self, meta: dict, geoms: list[Geom | None], inst: MeshInstances):
+    def __init__(self, meta: dict, geoms: list[Geom | None], inst: MeshInstances, texmean: list | None = None):
         self.meta, self.geoms, self.inst = meta, geoms, inst
+        self.texmean = texmean
 
     @classmethod
     def load(cls, season_parts: str = "fall2026", season_shapes: str = "summer", log=print) -> "MapMeshes | None":
@@ -111,7 +141,12 @@ class MapMeshes:
             log(f"map meshes not available ({e})")
             return None
         geoms = decode_geoms(meta, gb.read_bytes())
-        return cls(meta, geoms, instances_from_bin(ib.read_bytes(), meta))
+        try:
+            tm = texture_means(meta, season_parts, season_shapes, log)
+        except Exception as e:  # noqa: BLE001
+            log(f"texture colours not available ({e})")
+            tm = None
+        return cls(meta, geoms, instances_from_bin(ib.read_bytes(), meta), tm)
 
 
 def save_path() -> Path:

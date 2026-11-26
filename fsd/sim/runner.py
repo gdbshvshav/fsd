@@ -261,6 +261,7 @@ class SimRun:
         w.speed_kph = self.car.speed_kph
         w.speed_valid = True
         w.speed_limit_kph = self.sc.limit_kph
+        self.planner.frame = img
         plan = self.planner.step(w, self.p, True, now=self.t)
         self.last_plan = plan
         self.lat.observe(self.t, self.car.speed_kph, self.keys.obs.s, w.yaw_rate, self.p, w.lanes.conf > 0.4)

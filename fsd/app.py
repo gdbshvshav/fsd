@@ -161,6 +161,8 @@ class App:
             threading.Thread(target=self.disengage, args=("takeover",), daemon=True).start()
 
     def turn(self, direction: str) -> None:
+        # your Q/E press also toggled the game's blinker
+        self.planner.auto.blinker.driver_pressed(direction)
         msg = self.planner.turns.press(direction, time.perf_counter())
         self.learner.say(msg)
 
@@ -353,7 +355,13 @@ class App:
                     self.actuator.set_enabled(want)
             self.paused_reason = "" if focused or not self.engaged else "Paused: Roblox isn't the active window"
 
+            self.planner.frame = frame
             plan = self.planner.step(w, p, active, now)
+            # turn signals FSD decided on (lane change, merge, chosen turn): tap Q / E
+            for key in self.planner.auto.blinker.pop_taps():
+                if active:
+                    self.actuator.tap(key)
+                    self.learner.say(f"Blinker: {key} ({self.planner.auto.blinker.state or 'off'})")
             if active and self.fps and self.fps < 8 and plan.target_speed_kph > 30:
                 plan.target_speed_kph = 30.0         # PC can't keep up: drive slowly
                 plan.alert = f"Slow: only {self.fps:.0f} checks/s - capped at 30 km/h"

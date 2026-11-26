@@ -48,6 +48,8 @@ class Route:
     limit_kph: float = 90.0
     start_kph: float = 50.0
     vehicle: VehicleSpec = field(default_factory=VehicleSpec)
+    signal: str = "cycle"         # cycle | red | green | flashing : what the first light ahead shows us
+    junction_near: tuple[float, float] | None = None   # spawn on a road leading to the signal here
     description: str = ""
 
 
@@ -59,16 +61,20 @@ def _add(r: Route) -> None:
 
 
 # Real places on the map (found from the road paint). Headings follow the lane direction.
-_add(Route("highway_east", 2006.0, 2175.0, 1.0, 0.0, duration_s=45, limit_kph=100, start_kph=70,
-           description="Southern highway, eastbound, right lane: long straight, then the curve north."))
+_add(Route("highway_east", 2006.0, 2175.0, 1.0, 0.0, duration_s=26, limit_kph=100, start_kph=70,
+           description="Southern highway, eastbound: long straight up to the tunnel portal."))
 _add(Route("highway_west", 2006.0, 2128.0, -1.0, 0.0, duration_s=45, limit_kph=100, start_kph=70,
            description="Southern highway, westbound: straight into the long bend toward the interchange."))
-_add(Route("highway_curve_ne", 1201.0, -857.0, 0.82, 0.57, duration_s=40, limit_kph=100, start_kph=70,
-           description="Highway on the long sweeping bend north-east of the interchange."))
 _add(Route("interchange_sw", -505.0, -54.0, -0.70, 0.71, duration_s=35, limit_kph=90, start_kph=60,
            description="Diagonal highway through the big interchange, heading south-west."))
 _add(Route("town_south_north", -2180.0, 180.0, 0.0, -1.0, duration_s=35, limit_kph=56, start_kph=35,
            description="Southern town main street, northbound past junctions."))
+_add(Route("signal_red", -2666.0, -2707.0, 0.0, -1.0, junction_near=(-2666.0, -2707.0), duration_s=30, limit_kph=56, start_kph=40, signal="red",
+           description="Town avenue toward a real signalled junction that is RED for us: must stop and wait."))
+_add(Route("signal_cycle", -2666.0, -2707.0, 0.0, -1.0, junction_near=(-2666.0, -2707.0), duration_s=40, limit_kph=56, start_kph=40,
+           description="Same junction, lights cycling normally: stop on red, go on green."))
+_add(Route("signal_outage", -2666.0, -2707.0, 0.0, -1.0, junction_near=(-2666.0, -2707.0), duration_s=30, limit_kph=56, start_kph=40,
+           signal="flashing", description="Same junction in a power outage (flashing red): full stop, then go."))
 _add(Route("town_north_west", -2259.0, -2436.0, -1.0, 0.0, duration_s=30, limit_kph=56, start_kph=35,
            description="Northern town grid, westbound."))
 
@@ -120,6 +126,20 @@ class ErlcDrive:
         # spawn: centre of the chosen lane, heading along the lane lines
         hx, hz = route.hx, route.hz
         x, z = route.x, route.z
+        if route.junction_near is not None and emap.meshes is not None:
+            from .signals import Signals
+            sig = Signals(emap.meshes)
+            jx, jz = route.junction_near
+            J = min(sig.junctions, key=lambda J: math.hypot(J.centre[0] - jx, J.centre[2] - jz))
+            sp = None
+            for dist in (220.0, 180.0, 260.0, 150.0, 300.0):
+                cand = truth.approach(J.centre[0], J.centre[2], dist, prefer=(hx, hz))
+                if cand is not None and all(math.hypot(K.centre[0] - cand[0], K.centre[2] - cand[1]) > K.radius + 12
+                                            for K in sig.junctions):
+                    sp = cand
+                    break
+            if sp is not None:
+                x, z, hx, hz = sp
         lane = truth.lane_at(x, z, hx, hz)
         if lane is None:
             x, z = truth.beside_yellow(x, z, hx, hz)
@@ -132,6 +152,14 @@ class ErlcDrive:
         self.car.state.x, self.car.state.y = x * STUD_M, -z * STUD_M
         self.car.state.v = route.start_kph / 3.6
         self.ground = emap.ground_at(x, z)
+        self.signals = None
+        if emap.meshes is not None:
+            from .signals import Signals
+            self.signals = Signals(emap.meshes)
+            if route.signal != "cycle":
+                self.signals.force_for_route(x, z, hx, hz, route.signal)
+        self._in_junction: int | None = None
+        self.stopped_at_red = False
         self.cam.follow(*self._rear_axle(), self.car.state.heading, 0.9, dt)
         settings = Settings()
         settings.calibration = calibration_for(self.cam, route.vehicle.length, route.vehicle.width,
@@ -154,6 +182,7 @@ class ErlcDrive:
         self._edge_now = False
         self.last_world = None
         self.last_plan = None
+        self.blinker_taps: list[str] = []
 
     # ------------------------------------------------------------ geometry helpers
     def _rear_axle(self) -> tuple[float, float]:
@@ -180,6 +209,8 @@ class ErlcDrive:
     def frame(self, speed_kph: float, braking: bool) -> np.ndarray:
         x, z, hx, hz = self._centre_studs()
         eye, tgt = self._camera_studs()
+        if self.signals is not None:
+            self.gl.mesh_color_override = self.signals.colours(self.t)
         img = self.gl.render(eye, tgt, car_instances(x, self.ground, z, hx, hz, self.car.spec, braking))
         img = sky_gradient(img, self.cam.horizon_y)
         FlatRenderer._hud(None, img, speed_kph)
@@ -195,7 +226,9 @@ class ErlcDrive:
         w.speed_kph = self.car.speed_kph
         w.speed_valid = True
         w.speed_limit_kph = self.route.limit_kph
+        self.planner.frame = pair.work
         plan = self.planner.step(w, self.p, True, now=self.t)
+        self.blinker_taps += self.planner.auto.blinker.pop_taps()
         self.lat.observe(self.t, self.car.speed_kph, self.keys.obs.s, w.yaw_rate, self.p, w.lanes.conf > 0.4)
         steer = self.lat.step(w, plan, self.p, self.dt)
         pedal = self.lon.step(w, plan, self.p, self.dt)
@@ -219,8 +252,27 @@ class ErlcDrive:
         self.t += self.dt
         return pair.work
 
+    def _score_signals(self, x: float, z: float, hx: float, hz: float) -> None:
+        if self.signals is None:
+            return
+        S = self.signals
+        inside = None
+        for k, J in enumerate(S.junctions):
+            if math.hypot(J.centre[0] - x, J.centre[2] - z) < J.radius:
+                inside = k
+                break
+        if inside is not None and self._in_junction != inside:
+            faces = S.facing_us(inside, x - hx * 40, z - hz * 40, hx, hz)
+            if faces:
+                st = S.state_of(faces[0], self.t)
+                if st == "red" or (st == "yellow" and getattr(self, "_yellow_far", False)):
+                    self.m.red_light_violations += 1
+                    self.m.notes.append(f"entered junction {inside} on RED at t={self.t:.1f}s")
+        self._in_junction = inside
+
     def _score(self) -> None:
         x, z, hx, hz = self._centre_studs()
+        self._score_signals(x, z, hx, hz)
         self._speeds.append(self.car.speed_kph)
         lane = self.truth.lane_at(x, z, hx, hz)
         if lane is None:
@@ -273,6 +325,7 @@ def main() -> None:
     r.add_argument("--video", default=None)
     r.add_argument("--verbose", action="store_true")
     r.add_argument("--seconds", type=float, default=None)
+    r.add_argument("--fps", type=float, default=30.0, help="simulated camera frames per second")
     s = sub.add_parser("shot", help="save one picture from a route's start")
     s.add_argument("name")
     s.add_argument("--out", default="erlc_shot.png")
@@ -295,7 +348,7 @@ def main() -> None:
         if a.seconds:
             rt = Route(**{**rt.__dict__, "duration_s": a.seconds})
         vid = str(Path(a.video) / f"{n}.mp4") if a.video else None
-        m = ErlcDrive(rt, emap, truth, video=vid, verbose=a.verbose).run()
+        m = ErlcDrive(rt, emap, truth, video=vid, verbose=a.verbose, dt=1.0 / a.fps).run()
         sc = m.score()
         total += sc
         print(f"{'PASS' if m.passed() else 'FAIL'} {n:16s} score {sc:7.2f} | lane err {m.mean_abs_lane_err:.2f}/"

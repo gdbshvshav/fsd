@@ -285,6 +285,7 @@ class GLRenderer:
         self.visible_part = P.transp < 0.95
         self.color_override: dict[int, tuple] = {}     # part index -> rgb (signals)
         self._mesh_gl: dict[int, tuple] = {}
+        self.mesh_color_override: dict[int, tuple] = {}    # mesh instance -> (rgb, glow): signal lamps
         if emap.meshes is not None:
             I = emap.meshes.inst
             self.mesh_inst_all = instance_matrices(I.pos, I.rot, I.size)
@@ -292,15 +293,20 @@ class GLRenderer:
             for name, gain in MATERIAL_GAIN.items():
                 sel = I.mat_is(name)
                 mc[sel] = mc[sel] * gain          # may exceed 1 for vertex-coloured meshes: the shader clamps
-            if I.tex is not None:
-                # textured leaves (cut-out + alpha textures) would come out white without the
-                # texture: give foliage a leafy green, other textures a light neutral
-                texs = emap.meshes.meta.get("textures", [])
-                leafy = np.array([bool(t.get("cut") and t.get("alpha")) or bool(t.get("cut")) for t in texs] + [False])
-                ti = np.where((I.tex >= 0) & (I.tex < len(texs)), I.tex, len(texs))
-                fol = leafy[ti] & (I.color[:, 0] < 0)
-                rng = np.random.default_rng(3)
-                mc[fol] = np.array([0.30, 0.46, 0.20]) * rng.uniform(0.8, 1.15, (fol.sum(), 1))
+            tm = emap.meshes.texmean
+            if I.tex is not None and tm:
+                # no textures in our renderer: a textured mesh gets its texture's average colour
+                # (times its own colour), so STOP signs come out red, leaves green or autumn red...
+                lut = np.ones((len(tm) + 1, 3), np.float32)
+                for k, v in enumerate(tm):
+                    if v:
+                        c = np.array(v[:3], np.float32) / 255.0
+                        if c[0] > 1.35 * c[1] and c[0] > 1.35 * c[2] and c[0] > 0.3:
+                            c = np.array([0.78, 0.07, 0.07], np.float32)   # red signs: red, not pink
+                        lut[k] = c
+                ti = np.where((I.tex >= 0) & (I.tex < len(tm)), I.tex, len(tm))
+                textured = ti < len(tm)
+                mc[textured] = mc[textured] * lut[ti[textured]] * 1.25
             self.mesh_col_all = np.c_[mc, I.mat_is("Neon").astype(np.float32)].astype(np.float32)
         self.extra: list[tuple[int, np.ndarray, np.ndarray]] = []   # per frame (shape, mats, cols)
         self._terrain_vao = None
@@ -318,8 +324,9 @@ class GLRenderer:
         j1 = int(min(nz - 1, (cz + half - T.z0) // T.step))
         if i1 - i0 < 2 or j1 - j0 < 2:
             return
-        h = T.height[j0:j1 + 1, i0:i1 + 1]
+        h = T.height[j0:j1 + 1, i0:i1 + 1].copy()
         mat = T.mat[j0:j1 + 1, i0:i1 + 1]
+        h = self._carve_roads(h, T, i0, j0, cx, cz, half)
         xs = T.x0 + np.arange(i0, i1 + 1) * T.step
         zs = T.z0 + np.arange(j0, j1 + 1) * T.step
         X, Z = np.meshgrid(xs, zs)
@@ -356,6 +363,45 @@ class GLRenderer:
         self._terrain_center = (cx, cz)
         self._terrain_half = half
 
+    def _carve_roads(self, h: np.ndarray, T, i0: int, j0: int, cx: float, cz: float, half: float) -> np.ndarray:
+        """The terrain export is a height field, so where a road runs through a tunnel or a cut
+        the hill would cover it. Push the ground below every road surface instead."""
+        road_top = np.full(h.shape, np.inf, np.float32)
+
+        def stamp(pos, rot, size, top):
+            # footprint (oriented rectangle) -> grid cells
+            corners = np.array([[-1, -1], [1, -1], [1, 1], [-1, 1]]) * 0.5
+            ax_x, ax_z = rot[[0, 2], 0], rot[[0, 2], 2]
+            pts = pos[[0, 2]] + corners[:, :1] * size[0] * ax_x + corners[:, 1:] * size[2] * ax_z
+            g = np.stack([(pts[:, 0] - T.x0) / T.step - i0, (pts[:, 1] - T.z0) / T.step - j0], 1)
+            mask = np.zeros(h.shape, np.uint8)
+            cv2.fillConvexPoly(mask, np.round(g).astype(np.int32), 1)
+            if mask.any():
+                sel = mask.astype(bool)
+                road_top[sel] = np.minimum(road_top[sel], top)
+
+        P = self.map.parts
+        idx = self.map.near(cx, cz, half)
+        roadish = (P.mat_is("Asphalt") | P.mat_is("Concrete"))[idx] & (np.abs(P.rot[idx, 1, 1]) > 0.97) \
+            & (np.maximum(P.size[idx, 0], P.size[idx, 2]) > 10)
+        for i in idx[roadish]:
+            stamp(P.pos[i], P.rot[i], P.size[i], P.pos[i, 1] + P.size[i, 1] / 2)
+        mi = self.map.mesh_index
+        if mi is not None:
+            I = self.map.meshes.inst
+            midx = mi.near(cx, cz, half)
+            sel = midx[(I.mat_is("Asphalt")[midx]) & (np.maximum(I.size[midx, 0], I.size[midx, 2]) > 10)]
+            for i in sel:
+                stamp(I.pos[i], I.rot[i], I.size[i], I.pos[i, 1] - abs(I.rot[i][1, 1]) * I.size[i, 1] / 2 + 0.3)
+        if np.isfinite(road_top).any():
+            fin = np.isfinite(road_top)
+            grown = cv2.erode(np.where(fin, road_top, 1e6).astype(np.float32), np.ones((3, 3), np.uint8))
+            fin2 = grown < 1e5
+            cap = np.where(fin2, grown - 0.8, np.inf)
+            over = h > cap + 2.0                 # only where the hill would cover the road
+            h = np.where(over, cap, h)
+        return h
+
     # ------------------------------------------------------------ meshes
     def _geom_buffers(self, key: int):
         """(vbo, ibo or None) for a part shape (key < MESH_BASE) or a map mesh (MESH_BASE + geom)."""
@@ -386,6 +432,12 @@ class GLRenderer:
             return []
         mats = self.mesh_inst_all[idx]
         cols = self.mesh_col_all[idx]
+        if self.mesh_color_override:
+            ov = self.mesh_color_override
+            for k, i in enumerate(idx):
+                v = ov.get(int(i))
+                if v is not None:
+                    cols[k, :3], cols[k, 3] = v
         geo = I.geom[idx]
         out = []
         order = np.argsort(geo, kind="stable")

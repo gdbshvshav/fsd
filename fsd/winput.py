@@ -334,6 +334,14 @@ class Actuator:
             key_up(k)
         self._held.clear()
 
+    def tap(self, key: str, hold_s: float = 0.06) -> None:
+        """Press and release a key once (turn signals Q / E) without blocking the caller."""
+        def run():
+            key_down(key)
+            time.sleep(hold_s)
+            key_up(key)
+        threading.Thread(target=run, daemon=True).start()
+
     def _set(self, key: str, down: bool) -> None:
         if down and key not in self._held:
             key_down(key)

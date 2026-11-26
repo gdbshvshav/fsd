@@ -67,6 +67,10 @@ def find_lamps(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
         hy = float(housing_yel[ay0:ay1, ax0:ax1][ring].mean())
         if hd + hy < 0.28:
             continue                       # floating bright dot (sky glint, street light, sign)
+        if r >= 3 and (max(w, h) > 1.5 * min(w, h) or area < 0.45 * w * h):
+            continue                       # a lens is round and filled; signs and leaves aren't
+        if r >= 3 and not _slots_dark(V, x + w / 2, y + h / 2, r, state):
+            continue                       # sunlit leaves / a yellow warning sign, not a lamp
         # signal head box: ~3 lamps tall, centred so the lit lamp sits where its colour belongs
         bx0, bx1 = x - r * 0.6, x + w + r * 0.6
         if state == "red":
@@ -85,6 +89,30 @@ def find_lamps(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
     for o in out:
         o.extra.pop("_c", None)
     return _merge_heads(out)
+
+
+def _slots_dark(V: np.ndarray, cx: float, cy: float, r: float, state: str) -> bool:
+    """A real signal head has two more lamp slots stacked with the lit one (red on top,
+    green at the bottom), and those lenses are DARK. Sunlit autumn leaves or a yellow
+    chevron sign are bright all around instead."""
+    s = 1.3 * r
+    offs = {"red": (s, 2 * s), "yellow": (-s, s), "green": (-s, -2 * s)}[state]
+    Hh, Ww = V.shape
+    lit_v = float(V[int(min(Hh - 1, max(0, cy))), int(min(Ww - 1, max(0, cx)))])
+    ok = 0
+    for dy in offs:
+        yy = int(round(cy + dy))
+        h2 = max(1, int(r * 0.35))
+        y0, y1 = max(0, yy - h2), min(Hh, yy + h2 + 1)
+        x0, x1 = max(0, int(cx - h2)), min(Ww, int(cx + h2 + 1))
+        if y1 <= y0 or x1 <= x0:
+            continue                       # off the picture: can't tell, give it the benefit
+        m = float(V[y0:y1, x0:x1].mean())
+        if m < min(185.0, lit_v - 60.0):
+            ok += 1
+        else:
+            return False
+    return True
 
 
 def _drop_tail_lights(objs: list[Obj]) -> list[Obj]:

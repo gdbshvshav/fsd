@@ -88,33 +88,44 @@ class Tracker:
 
 
 class EgoMotion:
-    """Yaw rate from how far the horizon band slides sideways between frames."""
+    """Yaw rate from how far the horizon band slides sideways.
 
-    def __init__(self, focal_px: float):
+    A gentle highway bend turns the view by well under a pixel per frame, so we compare
+    with the picture from ~0.2 s ago (several frames back) at half resolution - big enough
+    to measure, short enough to follow the bend. Far scenery dominates the band, so
+    sideways motion is rotation, not our own forward motion.
+    """
+
+    def __init__(self, focal_px: float, span_s: float = 0.2, scale: float = 0.5):
         self.focal = focal_px
-        self.prev: np.ndarray | None = None
-        self.prev_t = 0.0
+        self.span_s = span_s
+        self.scale = scale
+        self.hist: deque[tuple[float, np.ndarray]] = deque(maxlen=30)
         self.yaw_rate = 0.0
         self._win = None
 
     def update(self, frame: np.ndarray, horizon_y: float, t: float) -> float:
         H, W = frame.shape[:2]
-        y0 = int(max(0, horizon_y - H * 0.12))
-        y1 = int(min(H, horizon_y + H * 0.03))
+        y0 = int(max(0, horizon_y - H * 0.10))
+        y1 = int(min(H, horizon_y + H * 0.04))
         band = cv2.cvtColor(frame[y0:y1, int(W * 0.05):int(W * 0.95)], cv2.COLOR_BGR2GRAY)
-        scale = 0.25
-        band = cv2.resize(band, None, fx=scale, fy=scale).astype(np.float32)
+        band = cv2.resize(band, None, fx=self.scale, fy=self.scale, interpolation=cv2.INTER_AREA).astype(np.float32)
         if self._win is None or self._win.shape != band.shape:
             self._win = cv2.createHanningWindow(band.shape[::-1], cv2.CV_32F)
-        if self.prev is not None and self.prev.shape == band.shape:
-            dt = t - self.prev_t
-            if 0.005 < dt < 0.3:
-                (dx, _), resp = cv2.phaseCorrelate(self.prev, band, self._win)
-                if resp > 0.05:
-                    # scene moves LEFT on screen when we turn RIGHT
-                    rate = -(dx / scale) / self.focal / dt
-                    self.yaw_rate = 0.6 * self.yaw_rate + 0.4 * float(np.clip(rate, -3, 3))
-        self.prev, self.prev_t = band, t
+            self.hist.clear()
+        # the reference: the newest stored frame that is at least span_s old
+        ref = None
+        for tt, b in self.hist:
+            if t - tt >= self.span_s * 0.8 and t - tt < 0.6:
+                ref = (tt, b)
+        if ref is not None:
+            dt = t - ref[0]
+            (dx, _), resp = cv2.phaseCorrelate(ref[1], band, self._win)
+            if resp > 0.04:
+                # scene moves LEFT on screen when we turn RIGHT
+                rate = -(dx / self.scale) / self.focal / dt
+                self.yaw_rate = 0.65 * self.yaw_rate + 0.35 * float(np.clip(rate, -3, 3))
+        self.hist.append((t, band))
         return self.yaw_rate
 
 

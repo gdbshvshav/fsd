@@ -18,6 +18,21 @@ def _red_mask(hsv: np.ndarray) -> np.ndarray:
     return cv2.morphologyEx(red.astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
 
 
+def _has_pole(img: np.ndarray, cx: float, y_bottom: int, h: int) -> bool:
+    """Is there a thin post straight below (a column that differs from its surroundings)?"""
+    H, W = img.shape[:2]
+    y0 = int(y_bottom + 1)
+    y1 = int(min(H, y_bottom + max(4, 3 * h)))
+    c = int(round(cx))
+    off = max(2, h)
+    if y1 - y0 < 3 or c - off < 0 or c + off >= W:
+        return True                                      # can't check at the edge: don't veto
+    g = cv2.cvtColor(img[y0:y1, c - off:c + off + 1], cv2.COLOR_BGR2GRAY).astype(np.int16)
+    centre = g[:, off - 1:off + 2].mean(axis=1)
+    sides = (g[:, 0] + g[:, -1]) / 2.0
+    return float(np.median(np.abs(centre - sides))) > 10.0
+
+
 def _judge(hsv: np.ndarray, blob: np.ndarray, w: int, h: int, a: int, W: int) -> float | None:
     """Score for one red blob (its own hsv crop + mask), None if it isn't a stop sign."""
     if not (0.7 < w / max(h, 1) < 1.4) or w > W * 0.12:
@@ -112,6 +127,8 @@ def find_stop_signs(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
             around = red[ay0:y + h + pad, ax0:x + w + pad]
             if cv2.countNonZero(around) > 2.2 * a:
                 continue
+            if not _has_pole(roi, x + w / 2, y + h, h):
+                continue                                 # nothing holding it up: leaves, a roof, a car
         k = scale_to
         out.append(Obj("stop_sign", (int(gx0 * k), int(gy0 * k), int(gx1 * k), int(gy1 * k)),
                        float(min(0.9, score))))

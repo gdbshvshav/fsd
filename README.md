@@ -111,6 +111,19 @@ python -m fsd.sim.erlc run town_south_north --video out --verbose
 python -m fsd.sim.erlc shot highway_east --out view.png
 ```
 
+## Driving on its own for hours
+
+- **Turn signals**: ER:LC's blinkers are Q (left) and E (right). Whenever FSD changes
+  lanes, merges or turns, it taps Q/E to put the blinker on, and taps again to switch it
+  off afterwards. If *you* put a blinker on, FSD leaves it for you to cancel.
+- **Lane ends / merges**: when our lane's lines converge ahead (2 lanes becoming 1, an
+  on-ramp joining the highway), FSD signals and merges into the lane that continues,
+  waiting for a gap.
+- **Road ends**: at a T-junction or dead end (junction ahead, no road straight on) it
+  picks the way that has road - right if both - signals and turns, stopping first if
+  there's a stop sign or a red light.
+- Turn these off in the settings with `auto_merge = 0` / `auto_route = 0`.
+
 ## How it drives (short version)
 
 - **Steering**: Roblox keyboard steering isn't an angle - holding A/D moves a hidden

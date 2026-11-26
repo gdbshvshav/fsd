@@ -53,6 +53,8 @@ SPEC: dict[str, Spec] = {
     "lookahead_max_m": Spec(32.0, 12.0, 60.0, "Max lookahead"),
     "steer_gain": Spec(1.15, 0.3, 3.0, "Curvature -> steering duty"),
     "steer_ff_gain": Spec(1.0, 0.0, 2.0, "Feed-forward from road curvature (1 = exactly the bend)"),
+    "auto_merge": Spec(1.0, 0.0, 1.0, "1 = merge by itself (with blinker) when our lane ends"),
+    "auto_route": Spec(1.0, 0.0, 1.0, "1 = pick a turn by itself when the road ends (T-junction)"),
     "steer_adapt": Spec(1.0, 0.0, 1.0, "1 = learn this car's steering strength while driving"),
     "cam_yaw_lag_s": Spec(0.2, 0.0, 0.8, "How far the game camera lags the car's turning (s)"),
     "steer_damping": Spec(0.35, 0.0, 1.5, "Damps yaw rate to stop overshoot/swerving"),

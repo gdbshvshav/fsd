@@ -149,3 +149,32 @@ class RoadTruth:
         t = float(np.clip(t, -L.half_len[i], L.half_len[i]))
         px, pz = L.cx[i] + t * L.ux[i], L.cz[i] + t * L.uz[i]
         return px + (-hz) * lane_half, pz + hx * lane_half
+
+    def approach(self, cx: float, cz: float, dist: float = 150.0, prefer: tuple[float, float] | None = None):
+        """A spawn (x, z, hx, hz) `dist` studs before the point (cx, cz) on a road that leads to it,
+        in the right-hand lane, heading toward it. prefer: rough heading wanted (unit x, z)."""
+        L = self.lines
+        idx = self._cand(cx, cz, dist + 60)
+        best, best_score = None, -1e9
+        for i in idx:
+            if not L.yellow[i]:
+                continue
+            for sgn in (1.0, -1.0):
+                hx, hz = L.ux[i] * sgn, L.uz[i] * sgn
+                # walk back from the junction along this line's direction
+                px, pz = cx - hx * dist, cz - hz * dist
+                # the line must pass near that spawn and point at the junction
+                along = (px - L.cx[i]) * L.ux[i] + (pz - L.cz[i]) * L.uz[i]
+                if abs(along) > L.half_len[i] + 15:
+                    continue
+                perp = abs(-(px - L.cx[i]) * L.uz[i] + (pz - L.cz[i]) * L.ux[i])
+                if perp > 20:
+                    continue
+                sc = -perp
+                if prefer is not None:
+                    sc += 30.0 * (hx * prefer[0] + hz * prefer[1])
+                if sc > best_score:
+                    x, z = self.beside_yellow(px, pz, hx, hz)
+                    if self.lane_at(x, z, hx, hz) is not None:
+                        best, best_score = (x, z, hx, hz), sc
+        return best

@@ -17,6 +17,7 @@ import numpy as np
 
 from ..world import Light, Mode, Obj, Plan, World
 from .junction_memory import JunctionMemory
+from .autonomy import Autonomy
 from .lead_memory import LeadMemory
 from .turns import TurnManager
 
@@ -41,6 +42,8 @@ class Planner:
         self.junction = JunctionMemory()
         self.sight_hist: list[float] = []
         self.lead_mem = LeadMemory()
+        self.auto = Autonomy()
+        self.frame = None            # latest work picture (set by the app / sim) for road-end checks
 
     def reset(self) -> None:
         self.__init__()
@@ -144,6 +147,7 @@ class Planner:
             cruise = min(cruise, max(40.0, limit))
 
         # ---------- turns / lane changes ----------
+        self.auto.step(w, self.turns, p, now, self.frame)
         self.turns.update(w, p, dt, now, self.adjacent_free(w, lane_w))
         ts = self.turns.s
 
