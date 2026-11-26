@@ -100,7 +100,7 @@ class YawFusion:
         est = self.model
         # lanes: yaw = v * road_k - d(heading)/dt
         self.lane_yaw = None
-        if lanes is not None and lanes.conf > 0.5 and v > 3.0:
+        if lanes is not None and lanes.conf > 0.4 and v > 3.0:
             if self._prev_heading is not None and self._prev_t is not None and 0.005 < t - self._prev_t < 0.2:
                 dhd = (lanes.heading - self._prev_heading) / (t - self._prev_t)
                 ly = v * lanes.curvature - dhd

@@ -162,7 +162,7 @@ class LaneFilter:
         self.rejects = 0
         K = self.P @ H.T @ Si
         self.x = self.x + K @ y
-        self.x[3] = float(np.clip(self.x[3], -0.4, 0.4))
+        self.x[3] = float(np.clip(self.x[3], -0.08, 0.08))
         self.P = (np.eye(4) - K @ H) @ self.P
         self.P = 0.5 * (self.P + self.P.T)
         # width: simple scalar filter, only from confident two-line detections

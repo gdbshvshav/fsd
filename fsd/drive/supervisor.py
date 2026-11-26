@@ -77,7 +77,7 @@ class Supervisor:
         if fps is not None and 0 < fps < 15:
             caps.append((max(25.0, fps * 4.0), f"only {fps:.0f} checks/s", 1))
         if weaving:
-            caps.append((max(40.0, v_kph * 0.85), "swinging in the lane - calming", 1))
+            caps.append((max(50.0, v_kph * 0.9), "swinging in the lane - calming", 1))
         target = min([c[0] for c in caps], default=999.0)
         # ease: caps come in at 15 km/h per second, go away at 8 km/h per second
         if target < self.cap:

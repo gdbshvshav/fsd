@@ -354,13 +354,15 @@ class FastPerception:
 
         # obstacles from free space (no AI): skip if YOLO already sees a car at that spot
         t0 = time.perf_counter()
-        free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"])
+        free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"],
+                                   edges=w.road_edges)
         for o in free:
             if not any(c.kind in ("car", "person", "cone") and abs(c.x - o.x) < 4 for c in others):
                 others.append(o)
         tm["obstacles"] = time.perf_counter() - t0
         w.clear_ahead_m = self.obstacles.clear_to
-        w.extra_hidden_m = self.obstacles.hidden_to
+        # road hidden behind our own car: at least up to the top of its outline on screen
+        w.extra_hidden_m = max(self.obstacles.hidden_to, hidden_from_box(geo, self.ego_box, frame.shape[1]))
 
         others = self.tracker.update(others, t)
         lane_cy = res.lanes.center[2] if res.lanes.conf > 0 else 0.0
@@ -424,8 +426,9 @@ class FastPerception:
             for k, v in cal_fields.items():
                 setattr(self.cal, k, v)
             self._rebuild_geometry(W, H)
-        free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"])
         edges = self._edges(frame, res, ego_mask)
+        free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"],
+                                   edges=edges)
         paint = None
         if res.masks is not None:
             paint = np.packbits((res.masks.paint | res.masks.wide) > 0, axis=None)

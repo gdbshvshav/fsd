@@ -20,6 +20,7 @@ from .lateral import LateralLQR
 from .longitudinal import LongitudinalController
 from .speed_planner import SpeedPlanner
 from .supervisor import Supervisor
+from .steer_check import SteerCheck
 from .telemetry import Telemetry
 from .turning import CamYaw, TurningModel
 from .yaw import YawFusion
@@ -40,7 +41,10 @@ class Driver:
         self.turning = TurningModel()          # this car's real steering / turning radius
         self.camyaw = CamYaw()
         self.vo_yaw: float | None = None
+        self.vo_trust = 0.0
         self._p = None
+        self._last_sense = None
+        self.steer_check = SteerCheck()
         self.loop_fps: float | None = None          # set by the app
         self.raw_speed_kph = 0.0
         self.raw_yaw = 0.0
@@ -60,8 +64,10 @@ class Driver:
         self.last_steer = 0.0
 
     # ------------------------------------------------------------------
-    def sense(self, w: World, p, now: float, steer_value: float, lanes_key=None) -> World:
+    def sense(self, w: World, p, now: float, steer_value: float, lanes_key=None, observer=None) -> World:
         self._p = p
+        dt_s = 1 / 60 if self._last_sense is None else float(min(0.2, max(1e-3, now - self._last_sense)))
+        self._last_sense = now
         self.steer_value = steer_value
         # speed: predict with the pedal we sent, correct with the speedometer
         sp = self.lon.speed
@@ -89,13 +95,28 @@ class Driver:
         self.vo_yaw = None
         if vo is not None and getattr(vo, "ok", False):
             self.vo_yaw = self.camyaw.update(now, vo.yaw, vo.conf, self.camlag.tau(p))
-        img_yaw = self.vo_yaw if self.vo_yaw is not None else self.raw_yaw
+        # trust the road-motion yaw only once it has proven itself against the lane lines
+        if self.vo_yaw is not None and self.yaw.lane_yaw is not None:
+            agree = abs(self.vo_yaw - self.yaw.lane_yaw) < 0.04 + 0.2 * abs(self.yaw.lane_yaw)
+            self.vo_trust = 0.98 * self.vo_trust + 0.02 * (1.0 if agree else 0.0)
+        use_vo = self.vo_yaw is not None and self.vo_trust > 0.7
+        img_yaw = self.vo_yaw if use_vo else self.raw_yaw
         gain = self.turning.strength(v)
         w.yaw_rate = self.yaw.update(now, v, steer_value, p, img_yaw,
                                      self.lanes.lanes(now) if self.lanes.ok else w.lanes, gain=gain)
         # learn this car's real turning (independent measurements only: lanes, then the road)
-        meas = self.yaw.lane_yaw if self.yaw.lane_yaw is not None else self.vo_yaw
+        meas = self.yaw.lane_yaw if self.yaw.lane_yaw is not None else (self.vo_yaw if use_vo else None)
+        if meas is None and self.lanes.ok and self.lanes.conf > 0.35:
+            # the lane filter has been correcting our yaw for a while: model yaw minus its learned
+            # bias is the car's real turn rate (works with weak lanes, unlike the derivative above)
+            meas = w.yaw_rate - self.lanes.yaw_bias
         self.turning.observe(now, v, steer_value, meas, p)
+        # keep the steering-value estimate honest with an independent turn-rate measurement
+        indep = self.yaw.lane_yaw if self.yaw.lane_yaw is not None else (self.vo_yaw if use_vo else None)
+        if p.get("steer_check", 1.0) > 0.5:
+            self.steer_check.update(observer, v, indep, gain, p, dt_s)
+            if observer is not None:
+                self.steer_value = observer.s
         # junction crossing: stop bar / crosswalk just ahead -> the lines will vanish for a while
         if min(w.stop_line_dist, w.crosswalk_dist) < 14.0:
             self.junction_until = now + float(min(7.0, 45.0 / max(v, 3.0)))
@@ -163,7 +184,8 @@ class Driver:
         """What's worth keeping between sessions (per vehicle): camera lag, pedal response."""
         return {"cam_lag": self.camlag.tau_learned, "cam_lag_n": self.camlag.samples,
                 "pedal": [(b.full, b.coast, b.brake, b.n_full, b.n_coast, b.n_brake) for b in self.lon.map.bands],
-                "lane_width": self.lanes.width, "turning": self.turning.to_dict()}
+                "lane_width": self.lanes.width, "turning": self.turning.to_dict(),
+                "steer_return_scale": self.steer_check.ret_scale}
 
     def restore(self, d: dict) -> None:
         if not d:
@@ -175,6 +197,8 @@ class Driver:
             for b, row in zip(self.lon.map.bands, d.get("pedal", [])):
                 b.full, b.coast, b.brake = float(row[0]), float(row[1]), float(row[2])
                 b.n_full, b.n_coast, b.n_brake = (min(int(x), 6) for x in row[3:6])
+            if d.get("steer_return_scale"):
+                self.steer_check.ret_scale = float(d["steer_return_scale"])
             if d.get("turning"):
                 self.turning.from_dict(d["turning"])
             if d.get("lane_width"):

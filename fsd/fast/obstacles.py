@@ -71,7 +71,7 @@ class ObstacleFinder:
         self._chain = True
 
     def find(self, frame: np.ndarray, lanes: Lanes, rows, paint_wide: np.ndarray,
-             ego_mask: np.ndarray | None, lane_width: float = 3.7) -> list[Obj]:
+             ego_mask: np.ndarray | None, lane_width: float = 3.7, edges=None) -> list[Obj]:
         """rows: ScreenLaneFinder (for its per-row distance tables)."""
         H, W = frame.shape[:2]
         self.clear_to = 0.0
@@ -92,10 +92,23 @@ class ObstacleFinder:
             d = float(rows.row_dist[y])
             if d < 0.8:
                 continue
-            if d > 60 or d > max(50.0, lanes.x_max + 20.0):
+            reach = max(50.0, lanes.x_max + 20.0) if abs(lanes.curvature) < 0.004 else max(14.0, lanes.x_max + 4.0)
+            if d > 60 or d > reach:
                 # past where we see our lane well: the lane is extrapolated a little further so a
                 # stopped car 30-50 m ahead (which itself HIDES the lines behind it) is found in time
                 break
+            if d > lanes.x_max + 4.0:
+                # ...but only while the extrapolated lane is still ON the road: where it runs off
+                # the road surface (a bend we can't see yet) the "obstacle" would be the verge
+                if edges is not None and getattr(edges, "ok", False) and d <= edges.x_max + 5.0:
+                    yl, yr = edges.at(d)
+                    yc = a * d * d + b * d + c
+                    if not (yl + 0.6 < yc < yr - 0.6):
+                        break
+                # where the road edges themselves curve away, the road bends: don't guess further
+                if edges is not None and getattr(edges, "ok", False) and \
+                        abs(edges.right[0]) + abs(edges.left[0]) > 0.004:
+                    break
             if d - last_d >= 0.5:
                 ys.append((y, d))
                 last_d = d

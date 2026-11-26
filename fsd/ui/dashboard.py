@@ -455,6 +455,11 @@ class Dashboard:
         q = ""
         if st.get("drive_weave"):
             q = " · softening steering (weave)"
+        if st.get("visual_speed"):
+            q += " · speed: road"
+        r = st.get("min_radius_town")
+        if r and r < 100:
+            q += f" · turn radius {r:.0f} m"
         keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map · R sides   {st.get('fps', 0):.0f} fps{lanes}"
                 f" · lights {st.get('lights_fps', 0):.0f}/s · v{st.get('params', 0)}{q}")
         if st.get("warn"):

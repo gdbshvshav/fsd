@@ -92,6 +92,7 @@ class App:
         self.planner.turns.model = self.driver.turning
         self._load_learned()
         self.actuator = Actuator()
+        self.actuator.ret_scale = self.driver.steer_check.ret_scale   # this car's learned spring-back
         self.camera = CameraAim()
         self.recorder = Recorder()
         self.recorder.on_saved = self._scenario_saved
@@ -414,7 +415,9 @@ class App:
             new_core = p.get("drive_core", 1.0) > 0.5
             if new_core:
                 # filtered speed / yaw / lanes (see fsd/drive); the vision uses our yaw next frame
-                self.driver.sense(w, p, now, self.actuator.steer_obs.s, lanes_key=w.lanes_t or None)
+                self.driver.sense(w, p, now, self.actuator.steer_obs.s, lanes_key=w.lanes_t or None,
+                                  observer=self.actuator.steer_obs)
+                self.actuator.ret_scale = self.driver.steer_check.ret_scale
                 self.perception.yaw_hint = w.yaw_rate
             self.actuator.speed_kph = w.speed_kph
 

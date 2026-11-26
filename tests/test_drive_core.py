@@ -206,7 +206,7 @@ def test_weave_guard_detects_swinging():
     g = WeaveGuard()
     t = 0.0
     for i in range(600):
-        g.update(t, 0.5 * math.sin(2 * math.pi * t / 2.0), True)
+        g.update(t, 0.7 * math.sin(2 * math.pi * t / 2.0), True)
         t += 1 / 60
     assert g.weaving and g.soft > 1.5
 
@@ -327,10 +327,12 @@ def test_side_keeper_needs_persistence():
     k = SideKeeper()
     L = lanes(right_col="yellow")
     assert not k.update(L, None, [], P, 0.0, 10.0, False).move_right
-    d = k.update(L, None, [], P, 0.7, 10.0, False)
+    L.right2 = LaneLine((0, 0, 5.6), 40)
+    k.update(L, None, [], P, 0.1, 10.0, False)
+    d = k.update(L, None, [], P, 1.8, 10.0, False)
     assert d.wrong_side and d.move_right
     # asks only once every few seconds
-    assert not k.update(L, None, [], P, 1.0, 10.0, False).move_right
+    assert not k.update(L, None, [], P, 2.0, 10.0, False).move_right
 
 
 def test_lane_filter_coasts_across_a_junction():

@@ -83,7 +83,7 @@ class TurningModel:
         ys = [x[3] for x in h if x[3] is not None]
         if len(ys) < 0.6 * len(h):
             return
-        if abs(ss.mean()) < 0.2 or ss.std() > 0.06 or vs.mean() < 1.5 or vs.std() > 0.15 * vs.mean() + 0.3:
+        if abs(ss.mean()) < 0.08 or ss.std() > 0.06 + 0.15 * abs(ss.mean()) or vs.mean() < 1.5 or vs.std() > 0.15 * vs.mean() + 0.3:
             return
         y = float(np.median(ys))
         v_m = float(vs.mean())

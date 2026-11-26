@@ -130,8 +130,20 @@ python -m fsd.sim.erlc shot highway_east --out view.png
 
 The driving core lives in `fsd/drive/` (param `drive_core` = 1; set it to 0 for the old one):
 
-- **Speed** is the speedometer reading *plus* what the pedals should be doing in between
-  readings, so it's never stale (a misread "70" for "20" is ignored unless it repeats).
+- **Speed** comes from three places: the speedometer reading, what the pedals should be
+  doing in between readings, and **the road moving under the car** (visual odometry:
+  bird's-eye strips of the road just past our car, compared frame to frame). The last one
+  updates every frame, so the speed FSD uses changes the moment the car speeds up,
+  even while the speedometer reader is still learning a digit. A stuck reading loses to
+  the road; a misread "70" for "20" is ignored unless it repeats.
+- **Turning radius**: FSD learns how tight *your* vehicle really turns at each speed
+  (bus, box truck, pickup and sports car all differ) from steady turns, and checks its idea
+  of the steering value against the measured turn rate (some cars spring back faster).
+  Junction turns are planned with that: slower, wider and started earlier for a long car.
+  Learned values are saved per vehicle in `data/learned/`.
+- **Stopped car in the lane**: after waiting (4 s, 8 s near a junction) FSD goes round on the
+  left over a dashed white line if that lane is clear, then moves back right. It never
+  crosses a yellow line on its own; it asks you (Q) instead.
 - **Yaw** (how fast we turn) comes from the steering we hold and the lanes; the picture
   is only trusted when it agrees. (The old picture-only yaw had spikes that steered the
   car off the road at 100 km/h.)

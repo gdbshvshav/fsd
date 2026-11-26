@@ -76,16 +76,22 @@ class LeadMemory:
                 L.y = seen.y
                 L.seen_t = t
                 return self._as_obj(L, speed_ms)
-            self.lead = Remembered(seen.x, seen.y, max(0.0, speed_ms + seen.vx), t, seen.kind,
-                                   seen.extra.get("half_width", 0.9))
+            v_meas = max(0.0, speed_ms + seen.vx)
+            if same:
+                # the same car again: its speed estimate changes slowly - a half-hidden car's
+                # measured speed jumps around, and a stopped car must not "drive off" on one frame
+                L.v_ground = 0.85 * L.v_ground + 0.15 * v_meas
+                L.x, L.y, L.seen_t = seen.x, seen.y, t
+                return seen
+            self.lead = Remembered(seen.x, seen.y, v_meas, t, seen.kind, seen.extra.get("half_width", 0.9))
             return seen
         if self.lead is None:
             return None
         L = self.lead
         unseen = t - L.seen_t
         keep = self.keep_close_s if L.x < self.close_m else self.keep_far_s
-        if L.x < max(hidden_m, 6.0) and speed_ms < 1.0:
-            keep = 1e9          # parked behind something we can't see any more: wait to SEE it gone
+        if L.x < max(hidden_m, 6.0) + 4.0 and L.v_ground < 1.5:
+            keep = 1e9          # right in front, stopped, hidden by our own car: wait to SEE it gone
         # "seen clear where it should be" only counts when that spot is in plain view (well past
         # the part of the road our own car hides) and the clear road reaches well beyond it -
         # a car right in front is half hidden and its roof reads as road

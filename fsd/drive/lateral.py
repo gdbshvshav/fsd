@@ -186,7 +186,7 @@ class WeaveGuard:
         # weaving = 3+ crossings within 6 s, with swings bigger than 0.25 m
         recent = [c for c in self.last_cross if t - c < 6.0]
         amp = max((abs(x[1]) for x in self.hist if t - x[0] < 6.0), default=0.0)
-        self.weaving = len(recent) >= 3 and amp > 0.4
+        self.weaving = len(recent) >= 4 and amp > 0.5
         if self.weaving:
             self.soft = min(6.0, self.soft * 1.02)
         else:

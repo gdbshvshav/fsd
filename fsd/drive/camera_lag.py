@@ -57,8 +57,11 @@ class CameraLag:
         if conf < 0.6 or v < 5.0 or abs(yaw) < 0.08 or len(self._yaw_hist) < 60:
             return
         ys = self._yaw_hist
-        if min(ys) * max(ys) <= 0 or (max(ys) - min(ys)) > 0.5 * abs(sum(ys) / len(ys)):
+        m = float(np.median(ys))
+        same_sign = float(np.mean(np.sign(ys) == np.sign(m)))
+        if same_sign < 0.9 or abs(m) < 0.08:
             return                                   # not a steady bend
+        yaw = m
         if abs(c_offset) > 1.5:
             return
         tau = self.tau(p)

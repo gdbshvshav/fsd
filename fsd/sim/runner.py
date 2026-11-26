@@ -268,7 +268,7 @@ class SimRun:
         w.speed_limit_kph = self.sc.limit_kph
         new_core = self.p.get("drive_core", 1.0) > 0.5
         if new_core:
-            self.driver.sense(w, self.p, self.t, self.keys.obs.s, lanes_key=w.lanes_t)
+            self.driver.sense(w, self.p, self.t, self.keys.obs.s, lanes_key=w.lanes_t, observer=self.keys.obs)
         self.planner.frame = img
         plan = self.planner.step(w, self.p, True, now=self.t)
         self.last_plan = plan

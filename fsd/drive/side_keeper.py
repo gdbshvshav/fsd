@@ -44,10 +44,19 @@ class SideKeeper:
         d = SideDecision()
         adv = side_advice(lanes, edges or RoadEdges(), objects, lanes.width_m or p["lane_width_m"])
         self.advice = adv
-        # wrong side: must persist 0.6 s
-        if adv.wrong_side:
+        # wrong side: must persist, with good lanes, AND there must be road to move into on the
+        # right (a lane line misread as yellow in a bend must never steer us onto the verge)
+        room = True
+        if adv.wrong_side and "yellow" in adv.reason:
+            lw = lanes.width_m or p["lane_width_m"]
+            if edges is not None and getattr(edges, "ok", False) and lanes.right is not None:
+                room = edges.at(10.0)[1] - lanes.right.y_at(10.0) > 0.8 * lw
+            else:
+                room = lanes.right2 is not None
+            room = room and lanes.conf > 0.55 and abs(lanes.curvature) < 0.012
+        if adv.wrong_side and room:
             self.wrong_since = self.wrong_since if self.wrong_since is not None else now
-            if now - self.wrong_since > 0.6:
+            if now - self.wrong_since > 1.5:
                 d.wrong_side = True
                 d.reason = adv.reason
                 if not lane_change_active and now - self._last_request > 4.0:

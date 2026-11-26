@@ -439,7 +439,7 @@ class ParallelPerception:
             w.stop_line_dist = (lr["stop"] - d) if lr["stop"] is not None else 999.0
             w.crosswalk_dist = (lr["cross"] - d) if lr["cross"] is not None else 999.0
             w.clear_ahead_m = max(0.0, lr["clear_to"] - d)
-            w.extra_hidden_m = lr["hidden_to"]
+            w.extra_hidden_m = max(lr["hidden_to"], hidden_from_box(geo, self.ego_box, frame.shape[1]))
             w.vanish_x = lr["vp_x"]
             for o in lr["obstacles"]:
                 o2 = Obj(o.kind, o.box, o.score, x=o.x - d, y=o.y, extra=dict(o.extra))

@@ -308,8 +308,10 @@ class Actuator:
         self._stop.set()
         self.release_all()
 
+    ret_scale = 1.0          # learned per vehicle by drive/steer_check.py
+
     def set_steer_model(self, rise: float, ret: float) -> None:
-        self.steer_obs.rise, self.steer_obs.ret = rise, ret
+        self.steer_obs.rise, self.steer_obs.ret = rise, ret * self.ret_scale
 
     def command(self, steer: float, pedal: float) -> None:
         """steer: wanted Roblox steering value (-1 full left .. +1 full right); pedal: -1 brake .. +1 throttle."""
