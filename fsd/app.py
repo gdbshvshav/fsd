@@ -30,7 +30,6 @@ from .learning.learner import Learner
 from .learning.recorder import Recorder, TrainingRecorder
 from .notify import BLUE, GREY, ORANGE, discord
 from .params import ParamStore
-from .fast.pipeline import FastPerception
 from .fast.scaler import FramePair
 from .perception.calibrate import apply as apply_calibration
 from .perception.calibrate import auto_calibrate
@@ -79,8 +78,11 @@ class App:
         self.capture = FileSource(source, fps=float(os.environ.get("FSD_REPLAY_FPS", "10"))) if source \
             else Capture(self.settings.monitor, self.settings.capture_fps)
         # 60 fps, no-GPU-needed vision; YOLO only adds extra detail when a GPU is there
-        self.perception = FastPerception(self.settings, on_calibrated=self.settings.save,
-                                         use_detector=self._want_yolo())
+        # vision spread over several CPU cores (separate processes) -> 60 fps on normal PCs;
+        # falls back to one process automatically
+        from .fast.parallel import make_perception
+        self.perception = make_perception(self.settings, on_calibrated=self.settings.save,
+                                          use_detector=self._want_yolo() and bool(os.environ.get("FSD_YOLO")))
         self.planner = Planner()
         self.lat = LateralController()
         self.lon = SpeedController()
@@ -288,7 +290,10 @@ class App:
         if fields:
             apply_calibration(self.settings.calibration, fields)
             self.settings.save()
-            self.perception.geo = None           # rebuild geometry with the new calibration
+            if hasattr(self.perception, "_apply_cal"):
+                self.perception._apply_cal(dict(fields), "")   # parallel engine: tell the workers too
+            else:
+                self.perception.geo = None           # rebuild geometry with the new calibration
         self.learner.say(msg)
 
     def _row(self, w: World, plan: Plan, steer: float, pedal: float) -> dict:

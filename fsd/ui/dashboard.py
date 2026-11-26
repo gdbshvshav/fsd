@@ -467,9 +467,9 @@ class Dashboard:
         self.screen.blit(foot, (0, Hv - foot.get_height()))
         self._text(self.f_small, msg[:90], WHITE, (10, Hv - 2 * self.line_h - 4))
         extra = f" · YOLO {st.get('det_fps', 0):.0f}/s" if st.get("device", "").startswith("GPU") else ""
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view   {st.get('fps', 0):.0f} fps "
-                f"({st.get('vision_ms', 0):.0f} ms) · lights {st.get('lights_fps', 0):.0f}/s{extra} · "
-                f"v{st.get('params', 0)}")
+        lanes = f" · lanes {st['lanes_fps']:.0f}/s" if "lanes_fps" in st else f" ({st.get('vision_ms', 0):.0f} ms)"
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view   {st.get('fps', 0):.0f} fps{lanes}"
+                f" · lights {st.get('lights_fps', 0):.0f}/s{extra} · v{st.get('params', 0)}")
         if st.get("warn"):
             keys = st["warn"] + " · " + keys
         self._text(self.f_small, keys[:110], (140, 144, 154), (10, Hv - self.line_h - 2))

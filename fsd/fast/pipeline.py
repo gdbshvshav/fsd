@@ -396,6 +396,53 @@ class FastPerception:
         self.last_objects = w.objects
         return w
 
+    # ------------------------------------------------------------------ split jobs (parallel engine)
+    def lanes_job(self, frame: np.ndarray, p: dict, t: float, ego_mask: np.ndarray | None,
+                  ego_rear: float | None) -> dict:
+        """Everything that needs the lane result: paint, lanes, stop bars, crosswalks, free-space
+        obstacles, self-calibration. Run in a worker process; returns small picklable data."""
+        t_start = time.perf_counter()
+        H, W = frame.shape[:2]
+        if self.geo is None or self.geo.W != W or self.geo.H != H:
+            self._setup(W, H)
+        if ego_mask is None or ego_mask.shape != (H, W):
+            ego_mask = np.zeros((H, W), np.uint8)
+            x1, y1, x2, y2 = self.ego_box
+            ego_mask[max(0, y1):y2, max(0, x1):x2] = 255
+        res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
+        cal_fields = self.autocal.add(res.ego_pair_screen, W, H, ego_rear, t)
+        if cal_fields:
+            for k, v in cal_fields.items():
+                setattr(self.cal, k, v)
+            self._rebuild_geometry(W, H)
+        free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"])
+        paint = None
+        if res.masks is not None:
+            paint = np.packbits((res.masks.paint | res.masks.wide) > 0, axis=None)
+        return {
+            "t": t, "lanes": res.lanes, "stop": res.stop_line, "cross": res.crosswalk,
+            "chains": [(np.asarray(pts, np.int16), ego, yel) for pts, ego, yel in res.chains_screen],
+            "paint": paint, "shape": (H, W), "obstacles": free,
+            "clear_to": self.obstacles.clear_to, "hidden_to": self.obstacles.hidden_to,
+            "vp_x": self.screen.vp_x, "ego_pair": res.ego_pair_screen,
+            "cal": dict(cal_fields) if cal_fields else None, "cal_msg": self.autocal.message if cal_fields else "",
+            "timings": {**{k: v for k, v in res.timings.items()}, "lanes_total": time.perf_counter() - t_start},
+        }
+
+    def objects_job(self, frame: np.ndarray, fine: np.ndarray | None, t: float, do_ego: bool) -> dict:
+        """Lamps, stop signs and (now and then) the exact outline of our car. Worker process."""
+        H, W = frame.shape[:2]
+        if self.geo is None or self.geo.W != W or self.geo.H != H:
+            self._setup(W, H)
+        t0 = time.perf_counter()
+        lamps, stops = self._objects_job(frame, fine, self.geo.horizon_y)
+        ego = None
+        if do_ego:
+            self.ego_shape.update(frame, self.ego_box, t)
+            if self.ego_shape.mask is not None:
+                ego = (self.ego_shape.region, self.ego_shape.mask.copy(), self.ego_shape.bbox)
+        return {"t": t, "lamps": lamps, "stops": stops, "ego": ego, "ms": (time.perf_counter() - t0) * 1000}
+
     def close(self) -> None:
         if self.ocr:
             self.ocr.stop()

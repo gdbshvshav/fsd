@@ -18,8 +18,8 @@ def shrink_to(frame: np.ndarray, width: int) -> np.ndarray:
     H, W = frame.shape[:2]
     if W <= width:
         return frame
-    k = W // width
-    if k >= 2 and W / k >= width * 0.92:
+    k = max(W // width, int(round(W / width)))      # 3838 px -> every 2nd pixel (1919), not a resize
+    if k >= 2 and W / k >= width * 0.9:
         out = frame[::k, ::k]
         if out.shape[1] <= width * 1.1:
             return out
