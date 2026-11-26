@@ -296,6 +296,8 @@ class Actuator:
         self.last_cmd = 0.0
         self.max_age = 0.3                # no fresh command for this long -> release W/A/S/D
         self.stale = False
+        from .control.steer_model import SteerObserver
+        self.steer_obs = SteerObserver()
         atexit.register(self.release_all)
 
     def start(self) -> "Actuator":
@@ -306,7 +308,11 @@ class Actuator:
         self._stop.set()
         self.release_all()
 
+    def set_steer_model(self, rise: float, ret: float) -> None:
+        self.steer_obs.rise, self.steer_obs.ret = rise, ret
+
     def command(self, steer: float, pedal: float) -> None:
+        """steer: wanted Roblox steering value (-1 full left .. +1 full right); pedal: -1 brake .. +1 throttle."""
         with self._lock:
             self.last_cmd = time.perf_counter()
             self.steer = max(-1.0, min(1.0, steer))
@@ -319,6 +325,7 @@ class Actuator:
             if not on:
                 self.steer = self.pedal = 0.0
                 self._acc_s = self._acc_p = 0.0
+                self.steer_obs.reset()
         if not on:
             self.release_all()
 
@@ -355,11 +362,13 @@ class Actuator:
             # keep holding throttle or steering - coast until fresh commands arrive.
             self.stale = time.perf_counter() - self.last_cmd > self.max_age
             if self.stale:
-                self._acc_s = self._acc_p = 0.0
+                self._acc_p = 0.0
                 s_cmd, pedal = 0.0, 0.0
             else:
                 s_cmd, pedal = self.steer, self.pedal
-            self._acc_s, s = self._sd(self._acc_s, s_cmd)
+            # steering: choose the key that brings the (estimated) Roblox steering value to s_cmd
+            s = self.steer_obs.choose(s_cmd, self.dt)
+            self.steer_obs.apply(s, self.dt)
             # never press S at a standstill (that would reverse) unless allowed
             if pedal < 0 and self.speed_kph < 1.5 and not self.allow_reverse:
                 pedal = 0.0

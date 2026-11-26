@@ -82,6 +82,8 @@ class World:
     tunnel: bool = False            # dark scene
     horizon_y: float = 0.0          # measured horizon (screen px), for camera aim
     vanish_x: float | None = None   # lane vanishing point x (screen px)
+    clear_ahead_m: float = 0.0      # our lane is SEEN to be clear up to here (0 = unknown / hidden)
+    extra_hidden_m: float = 0.0     # the first metres of our lane hidden behind our own car on screen
     timings: dict = field(default_factory=dict)
 
 

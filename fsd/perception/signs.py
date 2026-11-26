@@ -12,34 +12,102 @@ SPEED_SIGN_H_M = 0.9
 VALID_LIMITS = {10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80}
 
 
-def find_stop_signs(frame: np.ndarray, horizon_y: float) -> list[Obj]:
-    """Red octagon with white inside. Colour fallback for when YOLO isn't loaded."""
+def _red_mask(hsv: np.ndarray) -> np.ndarray:
+    hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    red = ((hue <= 8) | (hue >= 170)) & (sat > 120) & (val > 70)
+    return cv2.morphologyEx(red.astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+
+
+def _judge(hsv: np.ndarray, blob: np.ndarray, w: int, h: int, a: int, W: int) -> float | None:
+    """Score for one red blob (its own hsv crop + mask), None if it isn't a stop sign."""
+    if not (0.7 < w / max(h, 1) < 1.4) or w > W * 0.12:
+        return None
+    if a / float(w * h) < 0.55:
+        return None
+    val = hsv[:, :, 2]
+    bright = val[blob]
+    if bright.size and np.percentile(bright, 50) > 238:
+        return None                                       # a lit lamp, not paint
+    if w < 14:
+        return 0.42 + 0.02 * w
+    c = cv2.findContours(blob.astype(np.uint8) * 255, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
+    if not c:
+        return None
+    c = max(c, key=cv2.contourArea)
+    hull = cv2.convexHull(c)
+    solidity = cv2.contourArea(c) / max(cv2.contourArea(hull), 1)
+    approx = cv2.approxPolyDP(hull, 0.03 * cv2.arcLength(hull, True), True)
+    if solidity < 0.75 or not (6 <= len(approx) <= 10):
+        return None
+    inner = hsv[h // 3:2 * h // 3, w // 6:5 * w // 6]
+    white = ((inner[:, :, 1] < 60) & (inner[:, :, 2] > 170)).mean() if inner.size else 0
+    if white < 0.05:
+        return None
+    return 0.5 + min(0.4, float(white))
+
+
+def find_stop_signs(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
+                    fine: np.ndarray | None = None) -> list[Obj]:
+    """Red octagons with white inside (no AI). Seen 40+ m out: tiny ones (a few px) only need
+    the right colour, size and squareness; bigger ones must look like an octagon with white
+    lettering. Lit lamps (brake lights, red signal lamps) are brighter than sign paint: skipped.
+
+    The search runs on `frame` (small, fast); if `fine` (a sharper copy of the same picture)
+    is given, every candidate is re-measured there. Boxes come back in `frame` pixels x scale_to.
+    """
     H, W = frame.shape[:2]
     y0 = int(max(0, horizon_y - H * 0.2))
     y1 = int(min(H, horizon_y + H * 0.35))
     roi = frame[y0:y1]
+    if roi.size == 0:
+        return []
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    red = (((hsv[:, :, 0] <= 8) | (hsv[:, :, 0] >= 170)) & (hsv[:, :, 1] > 120) & (hsv[:, :, 2] > 70))
-    red = cv2.morphologyEx(red.astype(np.uint8) * 255, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    cnts, _ = cv2.findContours(red, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    red = _red_mask(hsv)
+    if cv2.countNonZero(red) == 0:
+        return []
+    kf = fine.shape[1] / W if fine is not None else 1.0
+    min_px = 2 if fine is not None else max(3, int(round(4 * W / 960)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(red, connectivity=8)
     out = []
-    for c in cnts:
-        a = cv2.contourArea(c)
-        if a < 120:
+    for i in range(1, n):
+        x, y, w, h, a = (int(v) for v in st[i])
+        if w < min_px or h < min_px or w > W * 0.12:
             continue
-        x, y, w, h = cv2.boundingRect(c)
-        if not (0.75 < w / max(h, 1) < 1.3):
+        if fine is not None:
+            # re-measure in the sharp picture
+            m = 2
+            fx0, fy0 = int((x - m) * kf), int((y + y0 - m) * kf)
+            fx1, fy1 = int((x + w + m) * kf), int((y + y0 + h + m) * kf)
+            fx0, fy0 = max(0, fx0), max(0, fy0)
+            crop = fine[fy0:fy1, fx0:fx1]
+            if crop.size == 0:
+                continue
+            fh = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            fr = _red_mask(fh)
+            fn, flab, fst, _ = cv2.connectedComponentsWithStats(fr, connectivity=8)
+            if fn <= 1:
+                continue
+            j = 1 + int(np.argmax(fst[1:, cv2.CC_STAT_AREA]))
+            bx, by, bw, bh, ba = (int(v) for v in fst[j])
+            if bw < 4 or bh < 4:
+                continue
+            sub = fh[by:by + bh, bx:bx + bw]
+            score = _judge(sub, flab[by:by + bh, bx:bx + bw] == j, bw, bh, ba, fine.shape[1])
+            gx0, gy0 = (fx0 + bx) / kf, (fy0 + by) / kf
+            gx1, gy1 = (fx0 + bx + bw) / kf, (fy0 + by + bh) / kf
+        else:
+            if w < min_px:
+                continue
+            sub = hsv[y:y + h, x:x + w]
+            score = _judge(sub, lab[y:y + h, x:x + w] == i, w, h, a, W)
+            gx0, gy0, gx1, gy1 = x, y + y0, x + w, y + h + y0
+        if score is None:
             continue
-        hull = cv2.convexHull(c)
-        solidity = a / max(cv2.contourArea(hull), 1)
-        approx = cv2.approxPolyDP(hull, 0.03 * cv2.arcLength(hull, True), True)
-        if solidity < 0.8 or not (6 <= len(approx) <= 10):
-            continue
-        inner = hsv[y + h // 3:y + 2 * h // 3, x + w // 6:x + 5 * w // 6]
-        white = ((inner[:, :, 1] < 60) & (inner[:, :, 2] > 170)).mean() if inner.size else 0
-        if white < 0.05:
-            continue
-        out.append(Obj("stop_sign", (x, y + y0, x + w, y + h + y0), 0.5 + min(0.4, white)))
+        if w < 14 * (1 / kf if fine is not None else 1) and gy1 < horizon_y - H * 0.12:
+            continue                                     # tiny and floating high in the sky
+        k = scale_to
+        out.append(Obj("stop_sign", (int(gx0 * k), int(gy0 * k), int(gx1 * k), int(gy1 * k)),
+                       float(min(0.9, score))))
     return out
 
 

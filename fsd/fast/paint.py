@@ -105,7 +105,11 @@ class PaintFinder:
             yel[a:b] = (thin_yel.astype(np.uint8) * 255) & both
             # wide paint (crosswalk blocks, stop bars, arrows): bright vs a big neighbourhood
             loc_w = cv2.subtract(Lb, cv2.morphologyEx(Lb, cv2.MORPH_OPEN, k_wide))
-            wide[a:b] = (((loc_w > 26) & whiteish[a:b]).astype(np.uint8) * 255) & cv2.dilate(rb, np.ones((3, 3), np.uint8))
+            # ...and not road-coloured itself: plain road next to a dark car or shadow is
+            # "brighter than its surroundings" too, but it's still road, not paint
+            not_road = (rb == 0)
+            wide[a:b] = (((loc_w > 26) & whiteish[a:b] & not_road).astype(np.uint8) * 255) & \
+                cv2.dilate(rb, np.ones((3, 3), np.uint8))
 
         stat = self._static[y0:] if self._static.shape == (H, W) else None
         for m in (paint, yel, wide):

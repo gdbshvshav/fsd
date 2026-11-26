@@ -55,7 +55,13 @@ SPEC: dict[str, Spec] = {
     "steer_ff_gain": Spec(0.8, 0.0, 2.0, "Feed-forward from road curvature"),
     "steer_damping": Spec(0.35, 0.0, 1.5, "Damps yaw rate to stop overshoot/swerving"),
     "steer_rate_limit": Spec(4.0, 1.0, 12.0, "Max change in steering duty per second"),
-    "steer_speed_scale": Spec(0.018, 0.0, 0.06, "Reduce steering authority per kph (high speed = gentler)"),
+    "steer_speed_scale": Spec(0.0, 0.0, 0.06, "Extra gentleness per kph (0 = rely on the steering model)"),
+    # ---- the car's keyboard steering (Roblox chassis), see control/steer_model.py ----
+    "wheelbase_m": Spec(2.9, 2.2, 5.0, "Distance between axles"),
+    "steer_lock_deg": Spec(32.0, 15.0, 45.0, "Full-lock wheel angle at walking speed"),
+    "steer_falloff_ms": Spec(28.0, 10.0, 60.0, "Speed (m/s) at which full lock has halved"),
+    "steer_rise_per_s": Spec(3.9, 1.0, 10.0, "How fast holding A/D moves the steering (fraction of lock per s)"),
+    "steer_return_per_s": Spec(6.0, 1.0, 15.0, "How fast the steering springs back when released"),
     "lane_center_bias_m": Spec(0.0, -0.8, 0.8, "Shift inside the lane (+ = right)"),
     # ---- longitudinal control ----
     "throttle_kp": Spec(0.09, 0.01, 0.4, "Throttle per kph of speed error"),
@@ -85,6 +91,7 @@ SPEC: dict[str, Spec] = {
 }
 
 VEHICLE_SPEC_KEYS = {
+    "wheelbase_m", "steer_lock_deg", "steer_falloff_ms", "steer_rise_per_s", "steer_return_per_s",
     "steer_gain", "steer_damping", "steer_ff_gain", "comfort_decel", "max_decel",
     "curve_lat_accel", "throttle_kp", "throttle_ff", "brake_kp", "turn_right_radius_m",
     "turn_left_radius_m", "turn_speed_kph",

@@ -38,6 +38,15 @@ class EgoShape:
         self._prev_fg: np.ndarray | None = None
         self.method = ""
 
+    def reset(self) -> None:
+        """Forget the outline (it wandered off); start again from the usual car area."""
+        self.mask = None
+        self.bbox = None
+        self._prev = None
+        self._still = None
+        self._moving_updates = 0
+        self._prev_fg = None
+
     def update(self, frame: np.ndarray, ego_box: tuple[int, int, int, int], t: float | None = None) -> None:
         t = time.perf_counter() if t is None else t
         if t - self._last < self.period:
@@ -87,7 +96,12 @@ class EgoShape:
             # colours, including flat road that only looks still). Still pixels are "probably
             # car"; a column through the middle of the car is certain.
             self.method = "stillness + grabcut"
-            gc[inner & (self._still >= 0.6)] = cv2.GC_PR_FGD
+            # still pixels inside a band around the car's box are "probably car"; still pixels
+            # further out are flat road that just looks still - leave them "probably road"
+            near_box = np.zeros((sh, sw), bool)
+            pxm, pym = int(0.15 * (bx2 - bx1)), int(0.15 * (by2 - by1))
+            near_box[max(0, by1 - pym):by2 + pym, max(0, bx1 - pxm):bx2 + pxm] = True
+            gc[inner & near_box & (self._still >= 0.6)] = cv2.GC_PR_FGD
             gc[inner & (self._still < 0.35)] = cv2.GC_BGD
             w3 = max(1, (bx2 - bx1) // 8)
             mx = (bx1 + bx2) // 2

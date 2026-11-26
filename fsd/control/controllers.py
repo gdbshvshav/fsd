@@ -15,10 +15,16 @@ import numpy as np
 from ..world import Mode, Plan, World
 
 KPH = 3.6
-K_FULL_LOCK = 1 / 7.0     # path curvature (1/m) that needs full steering at low speed
 
 
 class LateralController:
+    """Pure pursuit + curve feed-forward + yaw damping, in curvature (1/m).
+
+    The wanted curvature is turned into a Roblox steering value (-1..1) with the
+    chassis model (wheelbase, full lock that shrinks with speed). The actuator's
+    SteerObserver then picks the A/D presses that produce exactly that value.
+    """
+
     def __init__(self):
         self.out = 0.0
 
@@ -26,6 +32,7 @@ class LateralController:
         self.out = 0.0
 
     def step(self, w: World, plan: Plan, p, dt: float) -> float:
+        from .steer_model import steer_value_for_curvature
         path = plan.path
         if not path or len(path) < 2:
             return self._limit(0.0, p, dt)
@@ -42,13 +49,13 @@ class LateralController:
         kappa = 2.0 * ty / max(L2, 1.0)                     # pure-pursuit curvature (+ = right)
 
         road_k = w.lanes.curvature if plan.mode not in (Mode.TURNING,) else 0.0
-        desired_yaw = v * (kappa + p["steer_ff_gain"] * road_k)
-        yaw_err = w.yaw_rate - desired_yaw                   # turning more than wanted -> positive
-
-        cmd = (p["steer_gain"] * kappa + p["steer_ff_gain"] * road_k) / K_FULL_LOCK
-        cmd -= p["steer_damping"] * yaw_err * 1.5
-        cmd /= (1.0 + p["steer_speed_scale"] * w.speed_kph)
-        return self._limit(float(np.clip(cmd, -1, 1)), p, dt)
+        k_cmd = p["steer_gain"] * kappa + p["steer_ff_gain"] * road_k
+        # damping: if we're already turning faster than wanted, ease off (stops overshoot / swerve)
+        if v > 2.0:
+            k_cmd -= p["steer_damping"] * (w.yaw_rate / v - k_cmd)
+        k_cmd /= (1.0 + p["steer_speed_scale"] * w.speed_kph)
+        u = steer_value_for_curvature(k_cmd, v, p["wheelbase_m"], p["steer_lock_deg"], p["steer_falloff_ms"])
+        return self._limit(float(np.clip(u, -1, 1)), p, dt)
 
     def _limit(self, cmd: float, p, dt: float) -> float:
         step = p["steer_rate_limit"] * max(dt, 1e-3)

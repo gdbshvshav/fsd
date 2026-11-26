@@ -361,6 +361,7 @@ class App:
             if active:
                 steer = self.lat.step(w, plan, p, dt)
                 pedal = self.lon.step(w, plan, p, dt)
+                self.actuator.set_steer_model(p["steer_rise_per_s"], p["steer_return_per_s"])
                 self.actuator.command(steer, pedal)
                 if plan.mode == Mode.FAULT and w.speed_kph < 2:
                     self.disengage("lost road")

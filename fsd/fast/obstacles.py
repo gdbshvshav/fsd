@@ -43,14 +43,19 @@ class RoadModel:
                 m0, s0 = cur
                 setattr(self, name, (0.9 * m0 + 0.1 * mean, 0.9 * s0 + 0.1 * std))
 
-    def is_road(self, lab: np.ndarray) -> np.ndarray:
+    def is_road(self, lab: np.ndarray, hsv: np.ndarray | None = None) -> np.ndarray:
         out = np.zeros(lab.shape[:2], bool)
+        if hsv is not None:
+            # Roblox shadows are a dark, saturated-ish blue: whatever they fall on is
+            # almost always road here, and they must never look like a car
+            out |= (hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 2] < 125) & (hsv[:, :, 1] > 60)
         for cur in (self.sun, self.shade):
             if cur is None:
                 continue
             m, s = cur
-            d = np.abs(lab.astype(np.float32) - m) / (3.0 * s)
-            out |= (d < 1.0).all(axis=-1)
+            lo = np.clip(np.floor(m - 3.0 * s), 0, 255).astype(np.uint8)
+            hi = np.clip(np.ceil(m + 3.0 * s), 0, 255).astype(np.uint8)
+            out |= cv2.inRange(lab, lo, hi) > 0          # same test, done by OpenCV (fast)
         return out
 
 
@@ -60,11 +65,19 @@ class ObstacleFinder:
         self.hist: deque = deque(maxlen=6)
         self.persist = persist
         self.debug_rows: list = []
+        self.clear_to = 0.0          # lane positively seen clear up to this distance
+        self.hidden_to = 0.0         # the first metres hidden behind our own car on screen
+        self._seen_any = False
+        self._chain = True
 
     def find(self, frame: np.ndarray, lanes: Lanes, rows, paint_wide: np.ndarray,
              ego_mask: np.ndarray | None, lane_width: float = 3.7) -> list[Obj]:
         """rows: ScreenLaneFinder (for its per-row distance tables)."""
         H, W = frame.shape[:2]
+        self.clear_to = 0.0
+        self.hidden_to = 0.0
+        self._seen_any = False
+        self._chain = True
         if lanes.conf <= 0.15:
             self.hist.append(None)
             return []
@@ -109,35 +122,90 @@ class ObstacleFinder:
                 self.road.update(lab[pm], shadow[pm])
         if self.road.sun is None and self.road.shade is None:
             return []
-        # walk up the lane
+        # walk up the lane. All sampled rows are colour-converted in ONE call (they're stacked
+        # into a small image) - per-row conversions were the slow part.
         blocked = []
-        grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        for y, d in ys:
+        yrows = np.array([y for y, _ in ys], np.int32)
+        strip = np.ascontiguousarray(frame[yrows])                       # (N, W, 3)
+        lab_all = cv2.cvtColor(strip, cv2.COLOR_BGR2LAB)
+        grey_all = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY).astype(np.int16)
+        hsv_all = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+        road_all = self.road.is_road(lab_all, hsv_all)
+        white_all = (hsv_all[:, :, 2] > 185) & (hsv_all[:, :, 1] < 55)
+        ok_all = paint_wide[yrows] == 0
+        vis_all = ego_mask[yrows] == 0 if ego_mask is not None else None
+        if vis_all is not None:
+            ok_all &= vis_all
+        for n, (y, d) in enumerate(ys):
             cy = a * d * d + b * d + c
             u0 = int(rows.row_c0[y] + (cy - hw) * rows.row_ppm[y])
             u1 = int(rows.row_c0[y] + (cy + hw) * rows.row_ppm[y])
             u0, u1 = max(0, u0), min(W, u1)
             if u1 - u0 < 4:
-                blocked.append((d, 0.0, 0.0, u0, u1, y))
+                blocked.append((d, 0.0, 0.0, u0, u1, y, 0.0))
                 continue
-            seg = frame[y:y + 1, u0:u1]
-            lab = cv2.cvtColor(seg, cv2.COLOR_BGR2LAB)
-            road = self.road.is_road(lab)[0]
-            ok = paint_wide[y, u0:u1] == 0
-            if ego_mask is not None:
-                ok &= ego_mask[y, u0:u1] == 0
-            frac = float((~road & ok).sum()) / max(1, ok.sum()) if ok.sum() > 3 else 0.0
-            edges = float(np.abs(np.diff(grey[y, u0:u1].astype(np.int16))).mean()) if u1 - u0 > 2 else 0.0
-            blocked.append((d, frac, edges, u0, u1, y))
+            road = road_all[n, u0:u1]
+            ok = ok_all[n, u0:u1].copy()
+            wh = white_all[n, u0:u1]
+            if wh.any():
+                runs = int(np.count_nonzero(np.diff(wh.astype(np.int8)) == 1)) + int(wh[0])
+                if runs >= 3:
+                    ok &= ~wh                    # crosswalk / hatching stripes: paint, not a car
+            n_ok = int(ok.sum())
+            frac = float((~road & ok).sum()) / n_ok if n_ok > 3 else 0.0
+            g = grey_all[n, u0:u1]
+            edges = float(np.abs(g[1:] - g[:-1]).mean())
+            # beside our lane (past the lane lines): is it road there? A new road surface (junction,
+            # bridge, concrete -> asphalt) changes BOTH sides too; a car only fills our lane.
+            ppm, c0 = rows.row_ppm[y], rows.row_c0[y]
+            sides = []
+            for lo, hi in ((cy - hw - 2.6, cy - hw - 0.7), (cy + hw + 0.7, cy + hw + 2.6)):
+                v0, v1 = int(max(0, c0 + lo * ppm)), int(min(W, c0 + hi * ppm))
+                if v1 - v0 >= 3:
+                    so = ok_all[n, v0:v1]
+                    sides.append(float((~road_all[n, v0:v1] & so).sum()) / max(1, int(so.sum())))
+                else:
+                    sides.append(0.0)
+            blocked.append((d, frac, edges, u0, u1, y, min(sides)))
+            visible = float(vis_all[n, u0:u1].mean()) > 0.5 if vis_all is not None else True
+            if not visible and not self._seen_any:
+                self.hidden_to = d               # still under our own car on screen
+            else:
+                self._seen_any = True
+                if self._chain and visible and frac < 0.3:
+                    self.clear_to = d
+                else:
+                    self._chain = False
         self.debug_rows = blocked
-        # first block of >= 3 consecutive rows mostly not-road, with some edges
+        # first block of >= 3 consecutive rows mostly not-road. Some row in it must have edges
+        # (bodywork, tyres, lights) unless the block is tall - a big plain car body close up has
+        # few edges per row but fills many rows.
         found = None
-        run = 0
-        for i, (d, frac, edges, u0, u1, y) in enumerate(blocked):
-            if frac > 0.45 and edges > 2.0:
+        first_vis = None
+        for i, row in enumerate(blocked):
+            if row[0] > self.hidden_to:
+                first_vis = i
+                break
+        run, run_edges, start = 0, 0.0, 0
+        for i, (d, frac, edges, u0, u1, y, side) in enumerate(blocked):
+            if frac > 0.45:
+                if run == 0:
+                    start, run_edges, run_sides = i, 0.0, []
                 run += 1
-                if run >= 3:
-                    found = blocked[i - 2]
+                run_edges = max(run_edges, edges)
+                run_sides.append(side)
+                surface = run >= 3 and min(run_sides) > 0.6 and \
+                    float(np.median([r[2] for r in blocked[start:i + 1]])) < 4.0
+                if surface:
+                    continue                     # the whole road changes colour here - not a car
+                if run >= 3 and (run_edges > 2.0 or (run >= 6 and max(run_sides) < 0.3)):
+                    # the body floats above the road; walk back toward us over rows that are
+                    # partly blocked (tyres, bumper, the shadow under the car) to find where it
+                    # actually touches the road
+                    k = start
+                    while k - 1 >= 0 and blocked[k - 1][1] > 0.1 and blocked[start][0] - blocked[k - 1][0] < 2.5:
+                        k -= 1
+                    found = blocked[k]
                     break
             else:
                 run = 0
@@ -147,10 +215,15 @@ class ObstacleFinder:
             return []
         if max(recent[-self.persist:]) - min(recent[-self.persist:]) > 6:
             return []                        # jumping around: noise
-        d, frac, edges, u0, u1, y = found
+        d, frac, edges, u0, u1, y, _side = found
+        # the block starts right where our own car stops hiding the road: its bottom (where it
+        # touches the road) is hidden, so it's actually CLOSER - somewhere inside the hidden zone
+        occluded = first_vis is not None and blocked.index(found) <= first_vis + 1 and self.hidden_to > 1.0
+        if occluded:
+            d = min(d, self.hidden_to)
         cy = a * d * d + b * d + c
         # screen box: from the found row up to ~1.6 m high
         top = int(max(rows.geo.horizon_y, y - 1.6 * rows.row_ppm[y]))
         box = (int(u0), top, int(u1), int(y))
         return [Obj("obstacle", box, float(min(0.9, 0.4 + frac * 0.5)), x=float(d), y=float(cy),
-                    extra={"half_width": hw, "source": "free-space"})]
+                    extra={"half_width": hw, "source": "free-space", "occluded": occluded})]

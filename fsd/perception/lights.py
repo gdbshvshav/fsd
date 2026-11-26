@@ -129,6 +129,8 @@ class SignalTracker:
         self.last_dist = 999.0
         self.last_seen = 0.0
         self.last_info = SignalInfo()
+        self.last_box = None
+        self.hold_red_s = 6.0        # keep a red we lost sight of while close (head left the picture)
 
     def light_position(self, box) -> tuple[float, float]:
         x1, y1, x2, y2 = box
@@ -179,12 +181,25 @@ class SignalTracker:
             self.hist.append((t, state))
             self.last_seen = t
             self.last_dist = d0
+            self.last_box = info.box
         elif t - self.last_seen < 0.8 and self.last_state in (Light.RED, Light.FLASHING_RED):
-            # Lamp went dark for a moment: could be the off-phase of an outage
-            self.hist.append((t, "off"))
+            # Nothing found this frame. Only count it as "lamp off" (outage blink) if the head is
+            # still there and visibly dark; a plain missed detection must not look like flashing.
+            look = self.look_at_last_head(frame)
+            if look == "off":
+                self.hist.append((t, "off"))
+            elif look == "red":
+                self.hist.append((t, "red"))
             info.state = self.last_state
             info.distance = self.last_dist
             info.conf = 0.4
+        elif self.last_state == Light.RED and (t - self.last_seen < 1.0 or
+                                               (self.last_dist < 25 and t - self.last_seen < self.hold_red_s)):
+            # we were stopping/stopped for a red and the head dropped out of view: keep red
+            # until we see it change (better to wait a bit than to roll through a red)
+            info.state = Light.RED
+            info.distance = self.last_dist
+            info.conf = 0.3
 
         # outage detection
         while self.hist and t - self.hist[0][0] > flash_window:
@@ -196,6 +211,32 @@ class SignalTracker:
                 info.state = Light.FLASHING_RED
                 info.distance = self.last_dist
                 info.conf = max(info.conf, 0.6)
-        self.last_state = info.state
+        if info.state == Light.RED and not relevant:
+            self.last_state = Light.RED            # keep holding (doesn't refresh last_seen)
+        else:
+            self.last_state = info.state
         self.last_info = info
         return info
+
+    def look_at_last_head(self, frame: np.ndarray) -> str:
+        """'red' if a red lamp still glows where the head was, 'off' if the head is there but dark,
+        'gone' if we can't tell (moved / out of view)."""
+        if self.last_box is None:
+            return "gone"
+        x1, y1, x2, y2 = self.last_box
+        H, W = frame.shape[:2]
+        pad = max(2, (x2 - x1) // 2)
+        x1, x2 = max(0, x1 - pad), min(W, x2 + pad)
+        y1, y2 = max(0, y1 - pad), min(H, y2 + pad)
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return "gone"
+        hsv = cv2.cvtColor(frame[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+        hue, sat, val = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        red = ((hue <= 12) | (hue >= 166)) & (sat >= 100) & (val >= 200)
+        if red.sum() >= 1:
+            return "red"
+        dark = val < 95
+        housing = (hue >= 15) & (hue <= 35) & (sat > 90) & (val >= 110) & (val < 240)
+        if (dark | housing).mean() > 0.2:
+            return "off"
+        return "gone"

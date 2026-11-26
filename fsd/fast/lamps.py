@@ -57,8 +57,8 @@ def find_lamps(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
         state = max((("red", cr), ("yellow", cy_), ("green", cg)), key=lambda kv: kv[1])[0]
         r = max(w, h)
         # housing check: ring around the lamp
-        ax0, ax1 = max(0, x - 2 * r), min(roi.shape[1], x + w + 2 * r)
-        ay0, ay1 = max(0, y - 3 * r), min(roi.shape[0], y + h + 3 * r)
+        ax0, ax1 = max(0, x - r), min(roi.shape[1], x + w + r)
+        ay0, ay1 = max(0, y - 2 * r), min(roi.shape[0], y + h + 2 * r)
         ring = np.ones((ay1 - ay0, ax1 - ax0), bool)
         ring[y - ay0:y - ay0 + h, x - ax0:x - ax0 + w] = False
         if ring.sum() == 0:
@@ -80,8 +80,34 @@ def find_lamps(frame: np.ndarray, horizon_y: float, scale_to: float = 1.0,
             continue
         conf = float(min(0.95, 0.45 + 0.5 * (hd + hy)))
         out.append(Obj("light", box, conf, extra={"state": state, "lamp_px": float(r * scale_to),
-                                                   "source": "lamp"}))
+                                                   "source": "lamp", "_c": (x + w / 2, y + h / 2, r, w, h)}))
+    out = _drop_tail_lights(out)
+    for o in out:
+        o.extra.pop("_c", None)
     return _merge_heads(out)
+
+
+def _drop_tail_lights(objs: list[Obj]) -> list[Obj]:
+    """A car's tail / brake lights are two red lamps side by side on the same row, a car's
+    width apart (~3-9 lamp sizes), and wider than tall. Signal heads over neighbouring lanes
+    are a whole lane apart (12+ lamp sizes). Drop the pairs."""
+    reds = [o for o in objs if o.extra["state"] == "red"]
+    drop = set()
+    for i, a in enumerate(reds):
+        ax, ay, ar, aw, ah = a.extra["_c"]
+        for b in reds[i + 1:]:
+            bx, by, br, bw, bh = b.extra["_c"]
+            r = max(ar, br)
+            if min(ar, br) * 1.8 < r:
+                continue
+            if abs(ay - by) <= max(1.5, 0.6 * r) and 2.5 * r <= abs(ax - bx) <= 9.5 * r:
+                drop.add(id(a))
+                drop.add(id(b))
+    for o in reds:
+        ox, oy, orr, ow, oh = o.extra["_c"]
+        if ow >= 1.8 * oh and ow >= 4:
+            drop.add(id(o))                   # a strip, not a round lamp
+    return [o for o in objs if id(o) not in drop]
 
 
 def _inside(a, b) -> bool:

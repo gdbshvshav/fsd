@@ -205,10 +205,15 @@ class ScreenLaneFinder:
         sdl = np.bincount(L, d * lat, n)
         sll = np.bincount(L, lat * lat, n)
         sy = np.bincount(L, yl, n)
+        # per-blob min/max distance: sort once by label, then reduceat (ufunc.at is slow)
+        order = np.argsort(L, kind="stable")
+        Ls = L[order]
+        ds = d[order]
+        first = np.flatnonzero(np.r_[True, Ls[1:] != Ls[:-1]])
         dmin = np.full(n, np.inf)
         dmax = np.full(n, -np.inf)
-        np.minimum.at(dmin, L, d)
-        np.maximum.at(dmax, L, d)
+        dmin[Ls[first]] = np.minimum.reduceat(ds, first)
+        dmax[Ls[first]] = np.maximum.reduceat(ds, first)
         with np.errstate(invalid="ignore", divide="ignore"):
             md, ml = sd / cnt, sl / cnt
             vdd = sdd / cnt - md * md
@@ -224,8 +229,6 @@ class ScreenLaneFinder:
         ids = np.nonzero(good)[0]
         if ids.size == 0:
             return []
-        order = np.argsort(L, kind="stable")
-        Ls = L[order]
         starts = np.searchsorted(Ls, ids)
         ends = np.searchsorted(Ls, ids, side="right")
         segs = []                    # (x_mid, lat_mid, heading, length_m, d, lat, yellow, screen_pts)

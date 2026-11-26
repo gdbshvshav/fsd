@@ -18,36 +18,69 @@ def iou(a, b) -> float:
 
 
 class Tracker:
-    """Keeps IDs on cars/people across frames and estimates closing speed."""
+    """Keeps IDs on objects across frames and estimates their closing speed.
 
-    def __init__(self, max_age: float = 0.5):
+    Objects with a ground position (cars, obstacles, people) are matched by position
+    (gated by how far they can plausibly move), others (signs, lights) by box overlap.
+    Closing speed vx (m/s, negative = getting closer) is the slope of a least-squares
+    line through the last ~0.8 s of positions - much steadier than frame-to-frame
+    differences, which made a parked car look like it was driving away.
+    """
+
+    def __init__(self, max_age: float = 0.5, window_s: float = 0.8):
         self.tracks: dict[int, dict] = {}
         self.next_id = 1
         self.max_age = max_age
+        self.window_s = window_s
+
+    @staticmethod
+    def _positional(ob: Obj) -> bool:
+        return ob.x < 900 and ob.kind in ("car", "person", "cone", "emergency", "obstacle")
+
+    def _match(self, ob: Obj, used: set) -> int | None:
+        best, best_s = None, 0.0
+        for tid, tr in self.tracks.items():
+            if tid in used or tr["kind"] != ob.kind:
+                continue
+            if self._positional(ob) and tr["x"] < 900:
+                gx = 3.0 + 0.15 * ob.x
+                dx, dy = abs(ob.x - tr["x"]), abs(ob.y - tr["y"])
+                if dx > gx or dy > 1.8:
+                    continue
+                sc = 1.0 / (1.0 + dx / gx + dy / 1.8)
+            else:
+                sc = iou(ob.box, tr["box"])
+                if sc <= 0.25:
+                    continue
+            if sc > best_s:
+                best, best_s = tid, sc
+        return best
 
     def update(self, objs: list[Obj], t: float) -> list[Obj]:
         used = set()
-        for ob in objs:
-            best, best_s = None, 0.25
-            for tid, tr in self.tracks.items():
-                if tid in used or tr["kind"] != ob.kind:
-                    continue
-                s = iou(ob.box, tr["box"])
-                if s > best_s:
-                    best, best_s = tid, s
+        for ob in sorted(objs, key=lambda o: o.x):
+            best = self._match(ob, used)
             if best is None:
                 best = self.next_id
                 self.next_id += 1
-                self.tracks[best] = {"kind": ob.kind, "box": ob.box, "x": ob.x, "y": ob.y, "t": t, "vx": 0.0, "n": 0}
+                self.tracks[best] = {"kind": ob.kind, "box": ob.box, "x": ob.x, "y": ob.y, "t": t, "vx": 0.0,
+                                     "n": 0, "hist": deque(maxlen=60)}
             tr = self.tracks[best]
-            dt = t - tr["t"]
-            if 0.01 < dt < 0.5 and ob.x < 900 and tr["x"] < 900:
-                vx = (ob.x - tr["x"]) / dt
-                tr["vx"] = 0.7 * tr["vx"] + 0.3 * float(np.clip(vx, -60, 60))
+            if ob.x < 900:
+                tr["hist"].append((t, ob.x))
+                while tr["hist"] and t - tr["hist"][0][0] > self.window_s:
+                    tr["hist"].popleft()
+                if len(tr["hist"]) >= 3:
+                    ts = np.array([h[0] for h in tr["hist"]])
+                    xs = np.array([h[1] for h in tr["hist"]])
+                    if ts[-1] - ts[0] > 0.15:
+                        slope = float(np.polyfit(ts - ts[0], xs, 1)[0])
+                        tr["vx"] = float(np.clip(slope, -60, 60))
             tr.update(box=ob.box, x=ob.x, y=ob.y, t=t)
             tr["n"] += 1
             ob.track_id = best
             ob.vx = tr["vx"]
+            ob.extra["track_n"] = tr["n"]
             used.add(best)
         for tid in [k for k, v in self.tracks.items() if t - v["t"] > self.max_age]:
             del self.tracks[tid]

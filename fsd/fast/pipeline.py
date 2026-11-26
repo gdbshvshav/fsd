@@ -149,6 +149,7 @@ class FastPerception:
         self.motion = EgoMotion(self.geo.focal_px)
         x1, y1, x2, y2 = self.cal.ego_mask
         self.ego_box = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
+        self.ego_home = self.ego_box            # where the car normally sits; the outline may not wander off
         self.ego_shape = EgoShape()
 
     def _rebuild_geometry(self, W: int, H: int) -> None:
@@ -190,7 +191,7 @@ class FastPerception:
         src = fine if fine is not None else frame
         k = W / src.shape[1]
         lamps = find_lamps(src, horizon_y / k, scale_to=k)
-        stops = find_stop_signs(frame, horizon_y)
+        stops = find_stop_signs(frame, horizon_y, fine=fine)
         return lamps, stops
 
     # ------------------------------------------------------------------ ego car
@@ -205,14 +206,32 @@ class FastPerception:
         if bb is not None:
             x1, y1, x2, y2 = bb
             cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
-            if 0.3 * W < cx < 0.7 * W and 0.3 * H < cy < 0.9 * H and 0.03 * W < bw < 0.35 * W \
-                    and 0.03 * H < bh < 0.5 * H:
+            hx1, hy1, hx2, hy2 = self.ego_home
+            hw_, hh_ = hx2 - hx1, hy2 - hy1
+            # the outline may follow the car (zoom, other vehicles) but never balloon over the road:
+            # at most ~1.5x the usual car size, centred near the usual spot
+            sane = (abs(cx - (hx1 + hx2) / 2) < 0.35 * hw_ and abs(cy - (hy1 + hy2) / 2) < 0.35 * hh_
+                    and 0.5 * hw_ < bw < 1.5 * hw_ and 0.5 * hh_ < bh < 1.5 * hh_
+                    and y1 > hy1 - 0.12 * hh_)
+            if sane:
                 m = 0.06
                 target = (x1 - m * bw, y1 - m * bh, x2 + m * bw, y2 + m * bh)
                 self.ego_box = tuple(int(0.7 * e + 0.3 * tv) for e, tv in zip(self.ego_box, target))
+            else:
+                self.ego_shape.reset()
+                self.ego_box = self.ego_home
         mask = np.zeros((H, W), np.uint8)
         if self.ego_shape.mask is not None:
             self.ego_shape.paste(mask, 1.0, 1.0)
+            # hard limit: nothing outside a box around the car's usual spot. Sideways and down the
+            # car can swing a bit on bends; UP is where the car in front of us shows - with a fixed
+            # camera our roof never rises much, so a car parked just ahead can't be swallowed.
+            hx1, hy1, hx2, hy2 = self.ego_home
+            mw, mh = int(0.3 * (hx2 - hx1)), int(0.3 * (hy2 - hy1))
+            mt = int(0.08 * (hy2 - hy1))
+            lim = np.zeros_like(mask)
+            lim[max(0, hy1 - mt):hy2 + mh, max(0, hx1 - mw):hx2 + mw] = 255
+            mask &= lim
             mask = cv2.dilate(mask, np.ones((7, 7), np.uint8))
         else:
             x1, y1, x2, y2 = self.ego_box
@@ -328,6 +347,8 @@ class FastPerception:
             if not any(c.kind in ("car", "person", "cone") and abs(c.x - o.x) < 4 for c in others):
                 others.append(o)
         tm["obstacles"] = time.perf_counter() - t0
+        w.clear_ahead_m = self.obstacles.clear_to
+        w.extra_hidden_m = self.obstacles.hidden_to
 
         others = self.tracker.update(others, t)
         lane_cy = res.lanes.center[2] if res.lanes.conf > 0 else 0.0

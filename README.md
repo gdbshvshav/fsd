@@ -64,11 +64,56 @@ Every number lives in `fsd/params.py`, with its safe range and a one-line explan
 ## Testing without Roblox
 
 ```
-python -m pytest -q tests                                     # 26 unit tests
+python -m pytest -q tests                                     # unit + simulator tests
 python -m fsd.tools.inspect_image screenshot.png              # what perception sees
 python -m fsd --replay folder_of_screenshots --dry-run        # whole app, no key presses
 python -m fsd.learning.replay                                 # score saved disengages
 ```
+
+## Driving simulator (closed loop)
+
+FSD can drive a small ER:LC-style world on its own, so every change can be checked
+before it reaches the game. The simulator draws the game picture (same chase camera,
+70° FOV, road colours, blue shadows, yellow signal heads, HUD speedometer), feeds it
+through the *exact* perception / planning / control code the app uses, turns the
+controller's output into W/A/S/D presses through the same key modulator, and moves a
+car with keyboard-style Roblox physics (steering value ramps while A/D is held and
+springs back when released).
+
+```
+python -m fsd.sim list                        # the scenarios
+python -m fsd.sim run all                     # drive them all and score
+python -m fsd.sim run highway_curves --video out   # also write an mp4 of what FSD saw
+python -m fsd.sim run quick --coarse          # faster, lower-resolution picture
+python -m fsd.sim tune --rounds 3             # search better controller numbers
+```
+
+Each run reports lane error, lane departures, wheels over the edge/median, red lights
+run, stop signs rolled, collisions, closest gap and comfort, and says PASS/FAIL.
+
+Scenarios: straight and curved highway, yellow-edge highway, shadows, recovering from an
+offset start, red light, light cycling while approaching, stop sign, power outage
+(flashing red), lead car braking hard, parked car in the lane, heavy truck on bends,
+tight town bend, and starting with the wrong calibration.
+
+## How it drives (short version)
+
+- **Steering**: Roblox keyboard steering isn't an angle - holding A/D moves a hidden
+  steering value toward full lock and releasing springs it back. `control/steer_model.py`
+  tracks that value from the keys it pressed and chooses, 60 times a second, the key that
+  lands it on the wanted value. The wanted value comes from pure pursuit + the road's own
+  curve, divided by the full lock the car has at that speed.
+- **Junctions**: stop bars are measured while visible and *remembered* (dead-reckoned
+  from our speed) after they slide under our own car; a stop sign or flashing red seen
+  for the junction means a full stop at the bar, kept until the stop is done
+  (`planning/junction_memory.py`). A red light that leaves the picture while we're
+  stopped is held until it's seen to change.
+- **Cars ahead**: anything in our lane that isn't road colour is an obstacle (no AI
+  needed). A close car disappears behind our own car with the chase camera, so the
+  lead car is remembered and predicted (`planning/lead_memory.py`) - a far-away misread
+  of its roof can't make us drive into it.
+- **Traffic lights**: lit lamps found by brightness + colour inside a housing; a car's
+  two tail lights side by side are recognised and ignored.
 
 ## Layout
 
@@ -80,8 +125,10 @@ fsd/
   params.py           every tunable number + versioning/rollback
   settings.py         screen, calibration, keys, AI models (.env keys)
   perception/         lanes, lights, signs, YOLO, OCR, tracking, calibration
-  planning/           planner (rules), turns (Q/E, lane changes)
-  control/            steering + speed controllers, camera aim
+  fast/               the 60 fps vision path: paint, lanes, lamps, obstacles, pipeline
+  planning/           planner (rules), turns (Q/E, lane changes), junction + lead memory
+  control/            steering + speed controllers, Roblox steering model, camera aim
+  sim/                closed-loop driving simulator, scenarios, auto-tuner
   learning/           recorder, Gemini/Groq, replay tests, training
   ui/                 dashboard (pygame), debug drawing
 tests/                unit tests

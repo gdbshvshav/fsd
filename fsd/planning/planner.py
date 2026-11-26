@@ -16,6 +16,8 @@ import time
 import numpy as np
 
 from ..world import Light, Mode, Obj, Plan, World
+from .junction_memory import JunctionMemory
+from .lead_memory import LeadMemory
 from .turns import TurnManager
 
 KPH = 3.6
@@ -36,6 +38,8 @@ class Planner:
         self.last_limit_kph: float | None = None
         self.red_committed = False        # we decided to run a yellow
         self.last_stop_reason = ""
+        self.junction = JunctionMemory()
+        self.lead_mem = LeadMemory()
 
     def reset(self) -> None:
         self.__init__()
@@ -48,7 +52,7 @@ class Planner:
         py = np.array([p[1] for p in path])
         out = []
         for o in w.objects:
-            if o.kind not in ("car", "person", "cone", "emergency") or not (0 < o.x < 120):
+            if o.kind not in ("car", "person", "cone", "emergency", "obstacle") or not (0 < o.x < 120):
                 continue
             yp = float(np.interp(o.x, px, py))
             if abs(o.y - yp) < half + o.extra.get("half_width", 0.9):
@@ -92,9 +96,12 @@ class Planner:
     def stop_point(self, w: World, p, for_light: bool) -> float:
         """Metres to where the front bumper should stop."""
         cands = []
-        if w.stop_line_dist < 900:
+        jm = self.junction.bar_distance()
+        if jm < 900:                       # tracked bar: measured, or dead-reckoned once out of view
+            cands.append(jm - p["stop_line_offset_m"])
+        elif w.stop_line_dist < 900:
             cands.append(w.stop_line_dist - p["stop_line_offset_m"])
-        if w.crosswalk_dist < 900:
+        if w.crosswalk_dist < 900 and (not cands or w.crosswalk_dist < cands[0] + 2.0):
             cands.append(w.crosswalk_dist - p["stop_line_offset_m"] - 0.5)
         if cands:
             return max(0.0, min(cands))
@@ -120,6 +127,9 @@ class Planner:
 
         v = w.speed_kph / KPH
         lane_w = w.lanes.width_m or p["lane_width_m"]
+        jm = self.junction
+        jm.update(now, v, w.stop_line_dist, w.crosswalk_dist, w.stop_sign_dist,
+                  w.signal.state.value, w.signal.distance)
 
         # ---------- speed limit ----------
         if w.speed_limit_kph:
@@ -202,10 +212,12 @@ class Planner:
             self.red_committed = False if sig in (Light.GREEN, Light.NONE) else self.red_committed
 
         # ---------- stop signs and outages (full stop, then go when clear) ----------
-        needs_full_stop = (w.stop_sign_dist < 900 and now > self.cleared_sign_until) or \
+        needs_full_stop = ((w.stop_sign_dist < 900 or jm.full_stop_needed) and now > self.cleared_sign_until) or \
                           (sig == Light.FLASHING_RED and now > self.cleared_flash_until)
         if needs_full_stop and not ts.active:
             d = self.stop_point(w, p, for_light=(sig == Light.FLASHING_RED))
+            if d >= 900:
+                d = jm.stop_point(p["stop_line_offset_m"], p["stop_sign_fallback_m"])
             if d < 900:
                 if self.mode == Mode.STOP_WAIT or (d < 1.0 and v < 0.6):
                     if self.mode != Mode.STOP_WAIT:
@@ -217,6 +229,7 @@ class Planner:
                         if self.cross_traffic_clear(w):
                             self.cleared_sign_until = now + 8.0
                             self.cleared_flash_until = now + 8.0
+                            jm.mark_stopped()
                             mode, stop_at, reason = Mode.CRUISE, None, "clear - going"
                         else:
                             reason = "waiting for cross traffic"
@@ -224,7 +237,7 @@ class Planner:
                         reason = f"full stop {p['stop_sign_wait_s'] - waited:.1f}s"
                 else:
                     stop_at = d if stop_at is None else min(stop_at, d)
-                    reason = "stop sign" if w.stop_sign_dist < 900 else "outage: all-way stop"
+                    reason = jm.full_stop_reason or ("stop sign" if w.stop_sign_dist < 900 else "outage: all-way stop")
         elif self.mode == Mode.STOP_WAIT and not needs_full_stop:
             pass
 
@@ -238,6 +251,7 @@ class Planner:
                 break
             lead = o
             break
+        lead = self.lead_mem.update(now, v, lead, w.clear_ahead_m, w.extra_hidden_m)
         if lead is not None:
             v_lead = max(0.0, v + lead.vx)
             gap = lead.x
