@@ -457,6 +457,10 @@ class Dashboard:
             q = " · softening steering (weave)"
         if st.get("visual_speed"):
             q += " · speed: road"
+        if st.get("road_kind") and st["road_kind"] != "unknown":
+            q += f" · {st['road_kind']}"
+        if st.get("night_gain", 1.0) > 1.6:
+            q += f" · night x{st['night_gain']:.1f}"
         r = st.get("min_radius_town")
         if r and r < 100:
             q += f" · turn radius {r:.0f} m"

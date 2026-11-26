@@ -513,6 +513,7 @@ class ParallelPerception:
             "vision_fps": self.rate.value,
             "lanes_fps": self.lane_rate.value,
             "lights_fps": self.obj_rate.value,
+            "night_gain": (self.lane_res or {}).get("night_gain", 1.0),
             "vision_ms": self.lane_ms,
             "main_ms": self.ms,
             "lag_ms": self.lag_ms,

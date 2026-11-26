@@ -263,7 +263,7 @@ class SimRun:
         else:
             w = self.per.process(img, self.p, t=self.t)
         self.last_world = w
-        w.speed_kph = self.car.speed_kph
+        w.speed_kph = abs(self.car.speed_kph)          # the ER:LC speedometer shows speed, not direction
         w.speed_valid = True
         w.speed_limit_kph = self.sc.limit_kph
         new_core = self.p.get("drive_core", 1.0) > 0.5
@@ -279,6 +279,7 @@ class SimRun:
             steer = self.lat.step(w, plan, self.p, self.dt)
             pedal = self.lon.step(w, plan, self.p, self.dt)
         for _ in range(self.sub):
+            self.keys.allow_reverse = plan.reverse
             W_, A_, S_, D_ = self.keys.keys(steer, pedal, self.car.speed_kph)
             k = (1 if D_ else 0) - (1 if A_ else 0)
             if k != 0 and self._prev_steer_key != 0 and k != self._prev_steer_key:

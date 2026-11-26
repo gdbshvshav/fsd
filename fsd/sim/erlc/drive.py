@@ -226,7 +226,7 @@ class ErlcDrive:
         img = self.frame(self.car.speed_kph, braking)
         pair = FramePair(img, work_w=960, fine_w=1920)
         w = self.per.process(pair.work, self.p, t=self.t, fine=pair.fine)
-        w.speed_kph = self.car.speed_kph
+        w.speed_kph = abs(self.car.speed_kph)
         w.speed_valid = True
         w.speed_limit_kph = self.route.limit_kph
         new_core = self.p.get("drive_core", 1.0) > 0.5
@@ -242,6 +242,7 @@ class ErlcDrive:
             steer = self.lat.step(w, plan, self.p, self.dt)
             pedal = self.lon.step(w, plan, self.p, self.dt)
         for _ in range(self.sub):
+            self.keys.allow_reverse = plan.reverse
             W_, A_, S_, D_ = self.keys.keys(steer, pedal, self.car.speed_kph)
             self.car.step(self.dt / self.sub, W_, A_, S_, D_)
         self._last_pedal = pedal

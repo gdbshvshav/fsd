@@ -34,7 +34,9 @@ class SideKeeper:
         self.last = SideDecision()
         self.advice = SideAdvice()
         self._last_request = -1e9
+        self._last_t = None
         self.passed_at = -1e9            # set by the planner when we pulled out to pass
+        self.pass_dist_left = 0.0        # metres still to drive before the passed car is behind us
 
     def reset(self) -> None:
         self.__init__()
@@ -69,7 +71,11 @@ class SideKeeper:
             d.no_lines_offset = adv.target_offset
             d.reason = d.reason or adv.reason
         # after going around a stopped car (any speed): back to the right lane once it's behind us
-        if 6.0 < now - self.passed_at < 40.0 and lanes.conf > 0.5 and not lane_change_active:
+        if self.pass_dist_left > 0:
+            self.pass_dist_left -= v * (1 / 60 if self._last_t is None else max(0.0, min(0.2, now - self._last_t)))
+        self._last_t = now
+        if 3.0 < now - self.passed_at < 60.0 and self.pass_dist_left <= 0 and lanes.conf > 0.5 \
+                and not lane_change_active:
             R = lanes.right
             if R is not None and R.dashed and R.color == "white":
                 clear = not any(o.kind in ("car", "emergency", "obstacle") and -12 < o.x < 40

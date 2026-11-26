@@ -495,3 +495,27 @@ def test_cam_yaw_undoes_camera_lag():
         if i == 20:
             early = out
     assert early > cam * 0.0 and abs(out - 0.5) < 0.05
+
+
+def test_road_type_and_limits():
+    from fsd.drive.road_type import RoadTypeClassifier
+    from fsd.world import World
+    rc = RoadTypeClassifier()
+    # highway: dashed white on both sides, no junctions, fast
+    w = World(speed_kph=100.0, speed_valid=True)
+    w.lanes = lanes(right_dashed=True)
+    w.lanes.left = LaneLine((0, 0, -1.85), 40, "white", True, 0.8)
+    t = 30.0
+    for _ in range(600):
+        st = rc.update(w, t, 1 / 30, 100 / 3.6)
+        t += 1 / 30
+    assert st.kind == "highway" and abs(st.limit_kph - 104.6) < 1
+    # town: yellow centre, crosswalks keep appearing
+    rc = RoadTypeClassifier()
+    w = World(speed_kph=40.0, speed_valid=True)
+    w.lanes = lanes(left_col="yellow")
+    w.crosswalk_dist = 30.0
+    for _ in range(600):
+        st = rc.update(w, t, 1 / 30, 11.0)
+        t += 1 / 30
+    assert st.kind == "town" and abs(st.limit_kph - 56.3) < 1

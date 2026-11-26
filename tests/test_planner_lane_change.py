@@ -51,3 +51,39 @@ def test_lane_change_path_is_continuous_across_reassignment():
     assert yw.max() < 3.7 + 0.5                               # never overshoots into a third lane
     assert abs(yw[-1] - 3.7) < 0.3                            # ends in the middle of the new lane
     assert pl.turns.s.lane_change is False
+
+
+def test_left_turn_waits_for_oncoming_car_and_gets_in_lane():
+    from fsd.drive.junction_rules import JunctionRules
+    from fsd.planning.turns import TurnState
+    from fsd.world import Obj
+    jr = JunctionRules()
+    ts = TurnState(pending="left", junction_d=8.0)
+    w = world(0.0, 0.0)
+    car = Obj("car", (0, 0, 1, 1), 0.9, x=40.0, y=-3.7)
+    car.vx = -25.0 - 0.0          # coming toward us at 25 m/s while we roll slowly
+    w.objects = [car]
+    adv = jr.update(w, ts, 0.0, 0.0, 3.7, P)
+    assert adv.hold and "oncoming" in adv.message
+    car.x = 200.0
+    assert not jr.update(w, ts, 0.0, 1.0, 3.7, P).hold
+    # a car going OUR way on the left doesn't block a left turn
+    car.x, car.vx = 30.0, 0.0
+    w.speed_kph = 30.0
+    assert not jr.update(w, ts, 30 / 3.6, 2.0, 3.7, P).hold
+    # far from the junction with a dashed white line on the left: get in lane
+    ts2 = TurnState(pending="left", junction_d=100.0)
+    w.objects = []
+    adv = jr.update(w, ts2, 20.0, 10.0, 3.7, P)
+    assert adv.change_lane == "left"
+
+
+def test_turn_survives_a_lane_change_to_get_in_lane():
+    from fsd.planning.turns import TurnManager
+    tm = TurnManager()
+    tm.press("left", 0.0) if hasattr(tm, "press") else None
+    tm.s.pending, tm.s.junction_d = "left", 90.0
+    assert tm.lane_change_for_turn("left", 1.0, True)
+    assert tm.s.lane_change and tm.s.pending == "left"
+    tm.finish_lane_change()
+    assert tm.s.pending == "left" and not tm.s.lane_change and tm.s.junction_d == 90.0

@@ -21,7 +21,9 @@ from .autonomy import Autonomy
 from .lead_memory import LeadMemory
 from .turns import TurnManager
 from ..drive.path_planner import OffsetShaper, edges_path, heading_hold_path
+from ..drive.junction_rules import JunctionRules
 from ..drive.passing import PassingPlanner
+from ..drive.road_type import RoadTypeClassifier
 from ..drive.side_keeper import SideKeeper
 
 KPH = 3.6
@@ -42,6 +44,7 @@ class Planner:
         self.shaper = OffsetShaper()
         self._lc_was = False
         self._lc_switched = False
+        self._lc_seq = -1
         self.last_limit_kph: float | None = None
         self.red_committed = False        # we decided to run a yellow
         self.last_stop_reason = ""
@@ -51,6 +54,16 @@ class Planner:
         self.auto = Autonomy()
         self.side = SideKeeper()
         self.passing = PassingPlanner()
+        self.junction_rules = JunctionRules()
+        self.road_type = RoadTypeClassifier()
+        self.road_kind = "unknown"
+        self._limit_kind = "unknown"
+        self._was_turning = False
+        self.reverse_left_m = 0.0          # still to back up before pulling out round a stopped car
+        self._passing_lead = None
+        self._mem_off = None
+        self.reverse_started = -1e9
+        self.junction_advice = None
         self.side_decision = None
         self.frame = None            # latest work picture (set by the app / sim) for road-end checks
 
@@ -156,9 +169,24 @@ class Planner:
                   w.signal.state.value, w.signal.distance)
 
         # ---------- speed limit ----------
+        # what kind of road (town / rural / highway) -> usual limit when no sign has been read
+        rt = self.road_type.update(w, now, dt, v)
+        self.road_kind = rt.kind
         if w.speed_limit_kph:
             self.last_limit_kph = w.speed_limit_kph
-        limit = self.last_limit_kph or p["default_speed_limit_kph"]
+            self._limit_kind = rt.kind
+        elif self.last_limit_kph and rt.kind not in ("unknown", self._limit_kind) \
+                and now - self.road_type.kind_since > 10.0:
+            self.last_limit_kph = None             # different road now: that sign no longer applies
+        if self.turns.s.active:
+            self._was_turning = True
+        elif self._was_turning:
+            self._was_turning = False
+            self.last_limit_kph = None             # turned onto another road
+        default = p["default_speed_limit_kph"]
+        if p.get("road_type_limits", 1.0) > 0.5 and rt.limit_kph:
+            default = rt.limit_kph
+        limit = self.last_limit_kph or default
         cruise = min(limit + p["speed_over_limit_kph"], p["max_speed_kph"])
         if w.tunnel:
             cruise = min(cruise, max(40.0, limit))
@@ -173,6 +201,16 @@ class Planner:
         if sd.move_right and ts.pending is None:
             why = "back to our side" if sd.wrong_side else (sd.reason or "keeping right")
             msg = self.turns.force_lane_change("right", now, self.adjacent_free(w, lane_w).get("right", False), why)
+            if msg:
+                plan.alert = msg
+        ts = self.turns.s
+        # junction manners: get in lane for the turn, give way before turning left
+        ja = self.junction_rules.update(w, ts, v, now, lane_w, p)
+        self.junction_advice = ja
+        self.turns.hold_left = ja.hold
+        if ja.change_lane:
+            msg = self.turns.lane_change_for_turn(ja.change_lane, now,
+                                                  self.adjacent_free(w, lane_w).get(ja.change_lane, False))
             if msg:
                 plan.alert = msg
         ts = self.turns.s
@@ -192,10 +230,17 @@ class Planner:
             if ts.lane_change and w.lanes.conf > 0.3:
                 # glide from where the car actually is in the new lane
                 self.shaper.restart_from(float(np.clip(-w.lanes.offset, -lane_w, lane_w)))
-        if ts.lane_change and not self._lc_was:
+        if ts.lane_change and (not self._lc_was or ts.seq != self._lc_seq):
+            self._lc_seq = ts.seq
             self._lc_switched = False
+            # from a standstill (pulling out round a stopped car) the move has to be short and
+            # tight - but never tighter than this car can steer
+            min_len = 18.0
+            if v < 3.0:
+                r_min = self.turns.model.min_radius(2.0, p) if self.turns.model is not None else 6.0
+                min_len = float(np.clip(3.0 * r_min, 14.0, 22.0))
             self.shaper.set_target(self.shaper.target + ts.lc_dir * lane_w, v,
-                                   sec=p["lane_change_s"])
+                                   min_len=min_len, sec=p["lane_change_s"])
         self._lc_was = ts.lane_change
         want = 0.0 if not ts.lane_change else self.shaper.target
         if w.emergency_near and not ts.active:
@@ -328,7 +373,33 @@ class Planner:
                 break
             lead = o
             break
+        # a remembered car stays where it is on the ROAD: when we move sideways (pulling out
+        # round it), it moves the other way relative to us - the lane offset tells how much
+        if self.lead_mem.lead is not None and self._mem_off is not None and w.lanes.conf > 0.4:
+            d_off = w.lanes.offset - self._mem_off - getattr(w, "lane_switch", 0) * lane_w
+            if abs(d_off) < 0.5:
+                self.lead_mem.lead.y += d_off
+        self._mem_off = w.lanes.offset if w.lanes.conf > 0.4 else None
         lead = self.lead_mem.update(now, v, lead, w.clear_ahead_m, w.extra_hidden_m)
+        if lead is not None and self._passing_lead is not None and now - self._passing_lead[0] < 20.0 \
+                and lead.x < 2.0 and lead.track_id < 0:
+            # the car we're going round is now beside us: it isn't ahead of us any more
+            self.lead_mem.reset()
+            lead = None
+        if lead is not None and ts.lane_change and path:
+            # pulling out round it: a remembered car that our new path clears isn't in the way
+            xs = np.array([q[0] for q in path])
+            ys = np.array([q[1] for q in path])
+            half = lead.extra.get("half_width", 0.9) if lead.extra else 0.9
+            # our path beside the whole length of that car (its back to ~4.5 m further)
+            y_near = float(np.interp(lead.x, xs, ys))
+            y_far = float(np.interp(lead.x + 4.5, xs, ys))
+            clear = min(abs(lead.y - y_near), abs(lead.y - y_far)) > 0.95 + half + 0.25
+            if clear:
+                self._passing_lead = (now, lead.x)
+                lead = None
+        if lead is None and self._passing_lead is not None and now - self._passing_lead[0] < 6.0:
+            target = min(target, p.get("pass_speed_kph", 12.0))   # going round it: walking pace
         if lead is not None:
             v_lead = max(0.0, v + lead.vx)
             gap = lead.x
@@ -338,8 +409,9 @@ class Planner:
                 stop_at = 0.0 if stop_at is None else min(stop_at, 0.0)
             elif v_lead < 2.0 and v > v_lead + 1.0:
                 # stopped (or nearly) car ahead: a real stop point, so the speed planner brakes as
-                # hard as it must - up to everything - to stop behind it
-                sp = max(0.0, gap - p["follow_min_gap_m"])
+                # hard as it must - up to everything - to stop behind it. Leave room to pull out
+                # round it (a car length), like people do.
+                sp = max(0.0, gap - max(p["follow_min_gap_m"], p.get("stop_gap_stopped_m", 5.0)))
                 stop_at = sp if stop_at is None else min(stop_at, sp)
             if v_follow * KPH < target:
                 target = max(0.0, v_follow * KPH)
@@ -348,17 +420,45 @@ class Planner:
                 reason = f"following car {gap:.0f} m"
             plan.lead = lead
 
+        # ---------- left turn: give way to oncoming traffic ----------
+        if ja.hold and ts.junction_d is not None:
+            sp = max(0.0, ts.junction_d)
+            stop_at = sp if stop_at is None else min(stop_at, sp)
+            mode, reason = Mode.YIELD, ja.message
+
         # ---------- stuck behind a stopped car: go around it (dashed lane line only) ----------
         pd = self.passing.update(w, lead, now, v, p, ts.lane_change, ts.active, reason)
-        if pd.go and ts.pending is None:
-            msg = self.turns.force_lane_change(pd.go, now, True, "passing a stopped car")
-            if msg:
-                plan.alert = msg
-                self.side.passed_at = now
+        if pd.go and ts.pending is None and lead is not None:
+            # too close to swing out round it? back up first (straight, slowly), then go
+            r_min = self.turns.model.min_radius(2.0, p) if self.turns.model is not None else 6.0
+            need = float(np.clip(1.1 * r_min, 5.0, 10.0))
+            if lead.x < need and p.get("allow_reverse", 1.0) > 0.5:
+                self.reverse_left_m = need - lead.x
+                self.reverse_started = now
+                self.passing.last_pass = -1e9      # decide again once we've backed up
+                plan.alert = f"Backing up {self.reverse_left_m:.1f} m to get round the stopped car"
+            else:
+                msg = self.turns.force_lane_change(pd.go, now, True, "passing a stopped car")
+                if msg:
+                    plan.alert = msg
+                    self.side.passed_at = now
+                    self.side.pass_dist_left = lead.x + 4.5 + 12.0   # its length + a safe gap
         elif pd.message:
             plan.alert = pd.message
         if pd.waiting_for and lead is not None and v < 1.0:
             reason = f"{reason} · {pd.waiting_for}"
+
+        # ---------- backing up to make room ----------
+        if self.reverse_left_m > 0:
+            self.reverse_left_m -= v * dt                    # v = speed (the speedometer shows it unsigned)
+            if self.lead_mem.lead is not None:
+                self.lead_mem.lead.x += 2 * v * dt           # memory moved it closer as if we drove forward
+            if self.reverse_left_m <= 0 or now - self.reverse_started > 5.0 or w.emergency_near:
+                self.reverse_left_m = 0.0
+            else:
+                plan.reverse = True
+                target, stop_at = 0.0, None
+                mode, reason = Mode.CAUTION, "backing up to get round the stopped car"
 
         # ---------- emergency vehicles ----------
         if w.emergency_near:

@@ -119,3 +119,4 @@ class Plan:
     turn_preview: list[tuple[float, float]] = field(default_factory=list)
     alert: str = ""
     lane_change: bool = False        # a lane change is in progress (whatever the mode shows)
+    reverse: bool = False            # back up slowly, wheel straight (making room to pull out)

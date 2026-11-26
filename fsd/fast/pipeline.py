@@ -31,6 +31,7 @@ from ..perception.ocr import OcrWorker
 from ..perception.signs import STOP_SIGN_H_M, find_speed_sign_crops, find_stop_signs, sign_position
 from ..perception.tracking import EgoMotion, EmergencyDetector, Tracker, iou
 from ..settings import Settings
+from ..perception.exposure import AutoExposure, road_roi
 from ..perception.visual_odometry import VisualOdometry, hidden_from_box
 from ..world import Obj, World
 from .autocal import AutoCalibrator
@@ -121,6 +122,7 @@ class FastPerception:
         self.road_model = RoadModel()
         self.yaw_hint: float | None = None          # set by the driving core (not used for shifting here)
         self.vo = VisualOdometry()                  # speed + turn rate from the road moving under us
+        self.exposure = AutoExposure()              # night / dusk: brighten for the lane finders
         self.ego_shape = EgoShape()
         self.ego_box: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.autocal = AutoCalibrator(self.cal)
@@ -274,11 +276,12 @@ class FastPerception:
 
         # ---- lanes, stop bars, crosswalks ----
         t0 = time.perf_counter()
-        res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
+        lit = self._brighten(frame, W, H)
+        res = self.screen.process(lit, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
         self.last_screen = res
         w.lanes = res.lanes
         w.lanes_t = t
-        w.road_edges = self._edges(frame, res, ego_mask)
+        w.road_edges = self._edges(lit, res, ego_mask)
         tm["road"] = time.perf_counter() - t0
         w.stop_line_dist = res.stop_line if res.stop_line is not None else 999.0
         w.crosswalk_dist = res.crosswalk if res.crosswalk is not None else 999.0
@@ -354,7 +357,7 @@ class FastPerception:
 
         # obstacles from free space (no AI): skip if YOLO already sees a car at that spot
         t0 = time.perf_counter()
-        free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"],
+        free = self.obstacles.find(lit, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"],
                                    edges=w.road_edges)
         for o in free:
             if not any(c.kind in ("car", "person", "cone") and abs(c.x - o.x) < 4 for c in others):
@@ -420,6 +423,7 @@ class FastPerception:
             ego_mask = np.zeros((H, W), np.uint8)
             x1, y1, x2, y2 = self.ego_box
             ego_mask[max(0, y1):y2, max(0, x1):x2] = 255
+        frame = self._brighten(frame, W, H)
         res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
         cal_fields = self.autocal.add(res.ego_pair_screen, W, H, ego_rear, t)
         if cal_fields:
@@ -436,11 +440,23 @@ class FastPerception:
             "t": t, "lanes": res.lanes, "stop": res.stop_line, "cross": res.crosswalk,
             "chains": [(np.asarray(pts, np.int16), ego, yel) for pts, ego, yel in res.chains_screen],
             "paint": paint, "shape": (H, W), "obstacles": free, "edges": edges,
+            "night_gain": self.exposure.gain,
             "clear_to": self.obstacles.clear_to, "hidden_to": self.obstacles.hidden_to,
             "vp_x": self.screen.vp_x, "ego_pair": res.ego_pair_screen,
             "cal": dict(cal_fields) if cal_fields else None, "cal_msg": self.autocal.message if cal_fields else "",
             "timings": {**{k: v for k, v in res.timings.items()}, "lanes_total": time.perf_counter() - t_start},
         }
+
+    def _brighten(self, frame, W, H):
+        """Night / dusk: the lane, road and obstacle finders see a brightened picture."""
+        if self.geo is None:
+            return frame
+        try:
+            roi = road_roi(self.geo, hidden_from_box(self.geo, self.ego_box, W), W, H)
+            self.exposure.update(frame, roi)
+            return self.exposure.apply(frame)
+        except Exception:  # noqa: BLE001
+            return frame
 
     def _visual_odometry(self, frame, geo, t, w):
         try:

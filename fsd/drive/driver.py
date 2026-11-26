@@ -147,6 +147,12 @@ class Driver:
         if plan.mode == Mode.OFF:
             self.reset()
             return 0.0, 0.0
+        if plan.reverse:
+            # back up: wheel straight, gentle S (in ER:LC holding S at a standstill reverses), never fast
+            self.lat.reset()
+            pedal = -0.5 if v < 1.5 else 0.0
+            self.last_pedal, self.last_steer = pedal, 0.0
+            return 0.0, pedal
         # ---- steering ----
         # (the lane filter's yaw-bias state already absorbs a car that steers weaker/stronger than
         # the model; a learned strength factor on top fought it, so it's only used if asked for)

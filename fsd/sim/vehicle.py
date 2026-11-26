@@ -148,6 +148,8 @@ class KeyModulator:
         self.acc_p = 0.0
         self.dt = 1 / 60
 
+    allow_reverse = False
+
     def keys(self, steer: float, pedal: float, speed_kph: float, enabled: bool = True) -> tuple[bool, bool, bool, bool]:
         if not enabled:
             self.acc_s = self.acc_p = 0.0
@@ -155,7 +157,7 @@ class KeyModulator:
             return False, False, False, False
         s = self.obs.choose(steer, self.dt)
         self.obs.apply(s, self.dt)
-        if pedal < 0 and speed_kph < 1.5:
-            pedal = 0.0                       # never reverse at a standstill
+        if pedal < 0 and speed_kph < 1.5 and not self.allow_reverse:
+            pedal = 0.0                       # never reverse at a standstill (unless asked to back up)
         self.acc_p, p = self._sd(self.acc_p, max(-1.0, min(1.0, pedal)))
         return p > 0, s < 0, p < 0, s > 0     # W, A, S, D

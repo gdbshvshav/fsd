@@ -449,6 +449,7 @@ class App:
                     steer = self.lat.step(w, plan, p, dt)
                     pedal = self.lon.step(w, plan, p, dt)
                 self.actuator.set_steer_model(p["steer_rise_per_s"], p["steer_return_per_s"])
+                self.actuator.allow_reverse = bool(plan.reverse)
                 self.actuator.command(steer, pedal)
                 if plan.mode == Mode.FAULT and w.speed_kph < 2:
                     self.disengage("lost road")
@@ -503,6 +504,7 @@ class App:
             self.perception.messages.clear()
             st.update({"fps": self.fps, "params": self.store.version, "log": list(self.learner.log)})
             st.update(self.driver.status())
+            st["road_kind"] = self.planner.road_kind
             if self.learner.busy:
                 st["log"] = st["log"] + [self.learner.busy]
             with self._lock:

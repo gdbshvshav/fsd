@@ -141,9 +141,18 @@ The driving core lives in `fsd/drive/` (param `drive_core` = 1; set it to 0 for 
   of the steering value against the measured turn rate (some cars spring back faster).
   Junction turns are planned with that: slower, wider and started earlier for a long car.
   Learned values are saved per vehicle in `data/learned/`.
-- **Stopped car in the lane**: after waiting (4 s, 8 s near a junction) FSD goes round on the
-  left over a dashed white line if that lane is clear, then moves back right. It never
-  crosses a yellow line on its own; it asks you (Q) instead.
+- **Stopped car in the lane**: FSD stops a car length behind it. After waiting (4 s, 8 s
+  near a junction) it goes round on the left over a dashed white line if that lane is clear,
+  backing up a few metres first (straight, slowly) if it stopped too close to swing out, and
+  moves back right once the car is behind it. It never crosses a yellow line on its own;
+  it asks you (Q) instead.
+- **Junctions**: with a turn queued it moves into the lane on that side early (multi-lane
+  roads); a left turn waits for a gap in oncoming traffic.
+- **Road type**: town / rural / highway is recognised from the lanes and how often
+  junctions appear; with no sign read yet the usual ER:LC limit for that road type is used
+  (35 / 45 / 65 mph), and an old sign's limit is dropped after turning onto another road.
+- **Night**: ER:LC's day-night cycle; at night the picture is brightened for the lane, road
+  and obstacle finders (traffic lights are still read from the untouched picture).
 - **Yaw** (how fast we turn) comes from the steering we hold and the lanes; the picture
   is only trusted when it agrees. (The old picture-only yaw had spikes that steered the
   car off the road at 100 km/h.)

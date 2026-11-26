@@ -11,8 +11,11 @@
 """
 from __future__ import annotations
 
+import itertools
 import math
 from dataclasses import dataclass, field
+
+_SEQ = itertools.count(1)
 
 import numpy as np
 
@@ -30,6 +33,7 @@ class TurnState:
     lc_dir: int = 0
     message: str = ""
     preview: list = field(default_factory=list)
+    seq: int = field(default_factory=lambda: next(_SEQ))   # identifies this request
     radius: float = 0.0               # radius this car will actually drive for the turn (m)
     turn_speed: float = 0.0           # m/s to be at when the turn starts (lock + grip)
     limited_by: str = ""
@@ -80,6 +84,7 @@ class TurnManager:
             return st.message
         st.pending = direction
         st.since = now
+        st.seq = next(_SEQ)
         st.lane_change = True
         st.lc_progress = 0.0
         st.lc_dir = -1 if direction == "left" else 1
@@ -88,8 +93,30 @@ class TurnManager:
 
     def finish_lane_change(self) -> None:
         if self.s.lane_change:
+            resume = self._resume
             self.cancel()
             self.s.message = "Lane change complete"
+            if resume is not None:
+                # we changed lane to get ready for a turn: the turn is still wanted
+                self.s.pending, self.s.since, self.s.junction_d = resume
+                self.s.message = f"In lane for the {resume[0]} turn"
+            self._resume = None
+
+    _resume = None        # (pending, since, junction_d) of a turn waiting for a lane change
+    hold_left = False     # set by the planner: don't start a left turn yet (oncoming traffic)
+
+    def lane_change_for_turn(self, direction: str, now: float, free: bool) -> str:
+        """Change lane toward the turn while keeping the turn queued."""
+        st = self.s
+        if st.active or st.lane_change or not free or st.pending is None:
+            return ""
+        self._resume = (st.pending, st.since, st.junction_d)
+        st.seq = next(_SEQ)
+        st.lane_change = True
+        st.lc_progress = 0.0
+        st.lc_dir = -1 if direction == "left" else 1
+        st.message = f"Moving {direction} - getting in lane for the turn"
+        return st.message
 
     def cancel(self) -> None:
         self.s = TurnState()
@@ -155,6 +182,9 @@ class TurnManager:
             st.preview = arc_path(max(0.0, entry), radius, st.pending)
             extra = f" (wide car: {radius:.0f} m radius, {v_turn * 3.6:.0f} km/h)" if why == "lock" else ""
             st.message = f"Turning {st.pending} at the junction in {max(0, st.junction_d):.0f} m{extra}"
+            if entry <= 0.5 and st.pending == "left" and self.hold_left:
+                st.message = "Waiting for oncoming traffic before turning left"
+                return
             if entry <= 0.5:
                 st.active = True
                 st.started = now
@@ -167,6 +197,7 @@ class TurnManager:
         other = w.lanes.left2 if st.pending == "left" else w.lanes.right2
         if line is not None and line.dashed and other is not None and w.lanes.conf > 0.4:
             if adjacent_free.get(st.pending, False):
+                st.seq = next(_SEQ)
                 st.lane_change = True
                 st.lc_progress = 0.0
                 st.lc_dir = -1 if st.pending == "left" else 1
