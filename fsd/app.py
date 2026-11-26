@@ -359,6 +359,7 @@ class App:
                 plan.alert = f"Slow: only {self.fps:.0f} checks/s - capped at 30 km/h"
             steer = pedal = 0.0
             if active:
+                self.lat.observe(now, w.speed_kph, self.actuator.steer_obs.s, w.yaw_rate, p, w.lanes.conf > 0.4)
                 steer = self.lat.step(w, plan, p, dt)
                 pedal = self.lon.step(w, plan, p, dt)
                 self.actuator.set_steer_model(p["steer_rise_per_s"], p["steer_return_per_s"])

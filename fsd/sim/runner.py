@@ -263,6 +263,7 @@ class SimRun:
         w.speed_limit_kph = self.sc.limit_kph
         plan = self.planner.step(w, self.p, True, now=self.t)
         self.last_plan = plan
+        self.lat.observe(self.t, self.car.speed_kph, self.keys.obs.s, w.yaw_rate, self.p, w.lanes.conf > 0.4)
         steer = self.lat.step(w, plan, self.p, self.dt)
         pedal = self.lon.step(w, plan, self.p, self.dt)
         for _ in range(self.sub):

@@ -39,6 +39,7 @@ class Planner:
         self.red_committed = False        # we decided to run a yellow
         self.last_stop_reason = ""
         self.junction = JunctionMemory()
+        self.sight_hist: list[float] = []
         self.lead_mem = LeadMemory()
 
     def reset(self) -> None:
@@ -89,6 +90,9 @@ class Planner:
         if ln.conf <= 0:
             return [(float(x), 0.0) for x in np.linspace(0, 30, 16)]
         a, b, c = ln.center
+        # the chase camera swings after the car: while turning it points behind the car's
+        # heading, so everything looks rotated toward the inside of the bend. Undo that.
+        b = b - w.yaw_rate * p.get("cam_yaw_lag_s", 0.0)
         xs = np.linspace(0, max(15.0, min(60.0, ln.x_max)), 24)
         ys = a * xs * xs + b * xs + c + p["lane_center_bias_m"] + extra_shift
         return [(float(x), float(y)) for x, y in zip(xs, ys)]
@@ -175,6 +179,17 @@ class Planner:
             v_curve = math.sqrt(p["curve_lat_accel"] / curv) * KPH
             if v_curve < target:
                 target, reason = v_curve, "curve"
+        # ---------- sight distance: lane lines suddenly end much nearer than usual = a bend or
+        #            crest is coming that we can't see round. Slow so we could stop in what we see.
+        if w.lanes.conf > 0 and not ts.active:
+            self.sight_hist.append(w.lanes.x_max)
+            self.sight_hist = self.sight_hist[-90:]
+            usual = float(np.median(self.sight_hist)) if len(self.sight_hist) >= 15 else 0.0
+            sight = float(np.median(self.sight_hist[-5:]))
+            if usual > 20 and sight < 0.6 * usual:
+                v_sight = math.sqrt(2 * p["comfort_decel"] * max(4.0, sight - 2.0) + 36.0) * KPH
+                if v_sight < target:
+                    target, reason = v_sight, f"bend ahead (see {sight:.0f} m)"
         if ts.lane_change:
             mode, reason = Mode.LANE_CHANGE, f"lane change {ts.pending}"
 

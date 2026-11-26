@@ -232,6 +232,10 @@ class FastPerception:
             lim = np.zeros_like(mask)
             lim[max(0, hy1 - mt):hy2 + mh, max(0, hx1 - mw):hx2 + mw] = 255
             mask &= lim
+            # the core of the usual car spot is always our car, whatever the outline says
+            # (dark roofs/windows can fool GrabCut and then a "lane line" shows up on our roof)
+            cw, ch = int(0.12 * (hx2 - hx1)), int(0.10 * (hy2 - hy1))
+            mask[max(0, hy1 + ch):hy2 - ch, max(0, hx1 + cw):hx2 - cw] = 255
             mask = cv2.dilate(mask, np.ones((7, 7), np.uint8))
         else:
             x1, y1, x2, y2 = self.ego_box

@@ -26,10 +26,17 @@ class LateralController:
     """
 
     def __init__(self):
+        from .steer_adapt import SteerAdapter
         self.out = 0.0
+        self.adapt = SteerAdapter()
 
     def reset(self) -> None:
         self.out = 0.0
+
+    def observe(self, t: float, speed_kph: float, s_value: float, yaw_rate: float, p, lanes_ok: bool) -> None:
+        """Feed the car's measured response so steering strength adapts to this vehicle."""
+        if p.get("steer_adapt", 1.0) > 0.5:
+            self.adapt.update(t, speed_kph / KPH, s_value, yaw_rate, p, trustworthy=lanes_ok)
 
     def step(self, w: World, plan: Plan, p, dt: float) -> float:
         from .steer_model import steer_value_for_curvature
@@ -48,12 +55,20 @@ class LateralController:
         L2 = tx * tx + ty * ty
         kappa = 2.0 * ty / max(L2, 1.0)                     # pure-pursuit curvature (+ = right)
 
-        road_k = w.lanes.curvature if plan.mode not in (Mode.TURNING,) else 0.0
-        k_cmd = p["steer_gain"] * kappa + p["steer_ff_gain"] * road_k
+        # feed-forward: the road's own curve; feedback: pure pursuit's CORRECTION to it.
+        # (Adding the two outright double-counts the bend and cuts every corner.)
+        turning = plan.mode == Mode.TURNING
+        road_k = 0.0 if turning else w.lanes.curvature
+        if turning or w.lanes.conf <= 0:
+            k_cmd = p["steer_gain"] * kappa
+        else:
+            k_cmd = p["steer_ff_gain"] * road_k + p["steer_gain"] * (kappa - road_k)
         # damping: if we're already turning faster than wanted, ease off (stops overshoot / swerve)
         if v > 2.0:
             k_cmd -= p["steer_damping"] * (w.yaw_rate / v - k_cmd)
         k_cmd /= (1.0 + p["steer_speed_scale"] * w.speed_kph)
+        if p.get("steer_adapt", 1.0) > 0.5:
+            k_cmd /= self.adapt.gain                     # this car turns more/less than the model
         u = steer_value_for_curvature(k_cmd, v, p["wheelbase_m"], p["steer_lock_deg"], p["steer_falloff_ms"])
         return self._limit(float(np.clip(u, -1, 1)), p, dt)
 

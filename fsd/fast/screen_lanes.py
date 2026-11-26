@@ -201,9 +201,6 @@ class ScreenLaneFinder:
         cnt = np.bincount(L, minlength=n).astype(np.float64)
         sd = np.bincount(L, d, n)
         sl = np.bincount(L, lat, n)
-        sdd = np.bincount(L, d * d, n)
-        sdl = np.bincount(L, d * lat, n)
-        sll = np.bincount(L, lat * lat, n)
         sy = np.bincount(L, yl, n)
         # per-blob min/max distance: sort once by label, then reduceat (ufunc.at is slow)
         order = np.argsort(L, kind="stable")
@@ -216,28 +213,53 @@ class ScreenLaneFinder:
         dmax[Ls[first]] = np.maximum.reduceat(ds, first)
         with np.errstate(invalid="ignore", divide="ignore"):
             md, ml = sd / cnt, sl / cnt
-            vdd = sdd / cnt - md * md
-            vdl = sdl / cnt - md * ml
-            vll = sll / cnt - ml * ml
-            slope = np.where(vdd > 1e-4, vdl / vdd, 0.0)
-            resid = np.sqrt(np.maximum(0.0, vll - slope * vdl))       # rms distance from the blob's line
+            # quadratic fit per blob (lat = q0 + q1*u + q2*u^2, u = d - mean d), all blobs at once
+            # from moment sums - a long solid line on a bend is a curve, not a crooked straight line
+            u = d - md[L]
+            v = lat - ml[L]
+            S2 = np.bincount(L, u * u, n)
+            S3 = np.bincount(L, u ** 3, n)
+            S4 = np.bincount(L, u ** 4, n)
+            T1 = np.bincount(L, u * v, n)
+            T2 = np.bincount(L, u * u * v, n)
+            Q = np.bincount(L, v * v, n)
+            # centred: sum(u) = sum(v) = 0, so the system is [[c,0,S2],[0,S2,S3],[S2,S3,S4]] q = [0,T1,T2]
+            span = dmax - dmin
+            q1_lin = np.where(S2 > 1e-6, T1 / S2, 0.0)
+            # solve the 3x3 for blobs long enough to show a bend
+            A = np.zeros((n, 3, 3))
+            A[:, 0, 0], A[:, 0, 2], A[:, 2, 0] = cnt, S2, S2
+            A[:, 1, 1], A[:, 1, 2], A[:, 2, 1], A[:, 2, 2] = S2, S3, S3, S4
+            rhs = np.stack([np.zeros(n), T1, T2], 1)
+            use_q = (span > 4.0) & (cnt >= 12) & np.isfinite(A).all(axis=(1, 2))
+            q = np.zeros((n, 3))
+            if use_q.any():
+                Aq = A[use_q] + np.eye(3)[None] * 1e-6
+                q[use_q] = np.linalg.solve(Aq, rhs[use_q][..., None])[..., 0]
+            q[~use_q, 1] = q1_lin[~use_q]
+            q[~use_q, 0] = 0.0
+            q[~use_q, 2] = 0.0
+            ssr = Q - q[:, 1] * T1 - q[:, 2] * T2          # least-squares residual (sum v = 0)
+            resid = np.sqrt(np.maximum(0.0, ssr / cnt))
+            slope = q[:, 1]
+            bend = q[:, 2]
         h = stats[:, cv2.CC_STAT_HEIGHT]
         w = stats[:, cv2.CC_STAT_WIDTH]
         good = (cnt >= 6) & (h >= 3) & ~((w > 6 * h) & (w > 20)) & ((dmax - dmin) >= 0.6) \
-            & (np.abs(slope) <= 0.9) & (resid <= 0.35)
+            & (np.abs(slope) <= 0.9) & (resid <= 0.35) & (np.abs(bend) <= 0.03)
         good[0] = False
         ids = np.nonzero(good)[0]
         if ids.size == 0:
             return []
         starts = np.searchsorted(Ls, ids)
         ends = np.searchsorted(Ls, ids, side="right")
-        segs = []                    # (x_mid, lat_mid, heading, length_m, d, lat, yellow, screen_pts)
+        segs = []        # (x_mid, lat_mid, heading, length_m, d, lat, yellow, screen_pts, bend, d_min, d_max)
         for k, i in enumerate(ids):
             sel = order[starts[k]:ends[k]]
             span = float(dmax[i] - dmin[i])
             hb = float(slope[i]) if span > 1.5 else 0.0
             segs.append([float(md[i]), float(ml[i]), hb, span, d[sel], lat[sel], float(sy[i] / cnt[i]),
-                         np.stack([px[sel], py[sel]], 1)])
+                         np.stack([px[sel], py[sel]], 1), float(bend[i]), float(dmin[i]), float(dmax[i])])
 
         # union blobs that continue each other along the road
         parent = list(range(len(segs)))
@@ -249,16 +271,22 @@ class ScreenLaneFinder:
             return i
         order = sorted(range(len(segs)), key=lambda i: segs[i][0])
         for ii, i in enumerate(order):
-            xi, li, hi = segs[i][0], segs[i][1], segs[i][2]
+            xi, li, hi, bi = segs[i][0], segs[i][1], segs[i][2], segs[i][8]
             for j in order[ii + 1:]:
                 xj, lj, hj = segs[j][0], segs[j][1], segs[j][2]
                 gap = xj - xi
                 if gap > 30:
                     break
-                h = (hi + hj) / 2 if abs(hi - hj) < 0.25 else hi
-                if abs(hi - hj) > 0.3:
+                if abs(hi - hj) > 0.55:
                     continue
-                if abs((li + h * gap) - lj) < 0.45 + 0.015 * gap and (segs[i][6] > 0.4) == (segs[j][6] > 0.4):
+                if (segs[i][6] > 0.4) != (segs[j][6] > 0.4):
+                    continue
+                # on a bend the heading turns steadily, so going from i to j the average of the two
+                # headings is the right one (exact for a circle); a curved blob also says so itself
+                pred_avg = li + 0.5 * (hi + hj) * gap
+                pred_own = li + hi * gap + bi * gap * gap
+                tol = 0.45 + 0.02 * gap
+                if min(abs(pred_avg - lj), abs(pred_own - lj)) < tol:
                     parent[find(j)] = find(i)
         groups: dict[int, list[int]] = {}
         for i in range(len(segs)):
@@ -277,7 +305,7 @@ class ScreenLaneFinder:
             if deg == 1:
                 coef = np.array([0.0, coef[0], coef[1]])
             rms = float(np.sqrt(np.average((lat - np.polyval(coef, d)) ** 2, weights=w)))
-            if rms > 0.45 or abs(coef[0]) > 0.02:
+            if rms > 0.45 or abs(coef[0]) > 0.03:
                 continue
             fill = min(1.0, total / max(span, 1e-3))
             yfrac = float(np.average([segs[i][6] for i in idxs], weights=[segs[i][3] for i in idxs]))

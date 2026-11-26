@@ -92,8 +92,8 @@ class ObstacleFinder:
             d = float(rows.row_dist[y])
             if d < 0.8:
                 continue
-            if d > 60:
-                break
+            if d > 60 or d > max(12.0, lanes.x_max + 4.0):
+                break                    # past where we actually see our lane: don't guess
             if d - last_d >= 0.5:
                 ys.append((y, d))
                 last_d = d
