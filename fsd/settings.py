@@ -60,6 +60,32 @@ class Calibration:
     speed_unit: str = "auto"   # "auto" | "kph" | "mph"
 
 
+def quad_problem(quad) -> str:
+    """'' when the calibration trapezoid (fractions of the screen) makes sense, else what's wrong."""
+    try:
+        (blx, bly), (brx, bry), (trx, try_), (tlx, tly) = [(float(a), float(b)) for a, b in quad]
+    except Exception:  # noqa: BLE001
+        return "missing"
+    vals = (blx, bly, brx, bry, trx, try_, tlx, tly)
+    if any(v != v or abs(v) > 10 for v in vals):
+        return "not a number"
+    if not (blx < brx and tlx < trx):
+        return "left/right swapped (crossed)"
+    if not (tly < bly and try_ < bry):
+        return "top is below bottom"
+    if abs(bly - bry) > 0.02 or abs(tly - try_) > 0.02:
+        return "tilted"
+    if not (trx - tlx < brx - blx):
+        return "not narrowing toward the horizon"
+    if not (0.02 < brx - blx < 0.9):
+        return "lane width on screen is odd"
+    if not (0.2 < bly <= 1.0 and 0.1 < tly < 0.9):
+        return "off screen"
+    if not (0.15 < (blx + brx) / 2 < 0.85):
+        return "not in front of the car"
+    return ""
+
+
 @dataclass
 class Settings:
     monitor: int = 0                # which monitor ER:LC is on (0 = primary)
@@ -70,9 +96,15 @@ class Settings:
     record_key: str = "F2"          # training recorder on/off
     camera_key: str = "F3"          # re-aim camera now
     vehicle: str = "default"
+    # "auto" = virtual Xbox controller when its driver is installed (smooth analog steering and
+    # pedals), otherwise W/A/S/D. "controller" / "keyboard" to force one.
+    input_mode: str = "auto"
     ui_monitor: int = 1             # dashboard fills this monitor if you have 2 screens
     ui_overlay: bool = False        # True = always use the small floating window, even with 2 screens
     ui_on_top: bool = True          # stay above Roblox
+    # keep the FSD window out of screen capture so FSD (and screenshots) see the game under it.
+    # Set false if you want the FSD window in your own screenshots / recordings.
+    ui_hide_from_capture: bool = True
     ui_opacity: float = 0.92        # floating window see-through amount (0.3 - 1.0)
     ui_size: list = field(default_factory=lambda: [800, 450])   # floating window size (px)
     ui_pos: list | None = None      # floating window position; None = top-right corner
@@ -109,6 +141,25 @@ class Settings:
                         setattr(s.calibration, k, v)
             except (json.JSONDecodeError, OSError):
                 pass
+        # a broken camera calibration (crossed / upside-down trapezoid, ego box off the car) makes
+        # every lane line land in the wrong place: start from the measured defaults instead
+        bad = quad_problem(s.calibration.src_quad)
+        if bad:
+            fresh = Calibration()
+            s.calibration.src_quad = fresh.src_quad
+            s.calibration.quad_width_m = fresh.quad_width_m
+            s.calibration.quad_depth_m = fresh.quad_depth_m
+            s.calibration.bumper_to_quad_m = fresh.bumper_to_quad_m
+            s.calibration.cam_to_bumper_m = fresh.cam_to_bumper_m
+            s.calibration_reset = bad
+        em = s.calibration.ego_mask
+        try:
+            ok = len(em) == 4 and 0.3 < (em[0] + em[2]) / 2 < 0.7 and 0.02 < em[2] - em[0] < 0.35 \
+                and 0.03 < em[3] - em[1] < 0.45 and 0.25 < (em[1] + em[3]) / 2 < 0.9
+        except Exception:  # noqa: BLE001
+            ok = False
+        if not ok:
+            s.calibration.ego_mask = Calibration().ego_mask
         s.gemini_model = os.environ.get("GEMINI_MODEL", s.gemini_model)
         s.groq_model = os.environ.get("GROQ_MODEL", s.groq_model)
         return s

@@ -91,7 +91,10 @@ class App:
         self.driver = Driver()
         self.planner.turns.model = self.driver.turning
         self._load_learned()
-        self.actuator = Actuator()
+        from .gamepad import make_actuator
+        self._input_msgs: list[str] = []
+        self.actuator = make_actuator(self.settings.input_mode if not self.dry_run else "keyboard",
+                                      log=self._input_msgs.append)
         self.actuator.ret_scale = self.driver.steer_check.ret_scale   # this car's learned spring-back
         self.camera = CameraAim()
         self.recorder = Recorder()
@@ -99,6 +102,15 @@ class App:
         self.trainrec = TrainingRecorder()
         self.engaged = False
         self.learner = Learner(self.store, self.settings, lambda: self.engaged, self.camera)
+        for m in self._input_msgs:
+            self.learner.say(m)
+        if getattr(self.settings, "calibration_reset", ""):
+            self.learner.say(f"Camera calibration was broken ({self.settings.calibration_reset}) - reset to the "
+                             "default. Drive straight in a marked lane and it re-measures itself.")
+            self.settings.save()
+        from .report import Reporter
+        self.reporter = Reporter(self)
+        self.dev_view = False
         self._snap = Snapshot()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -127,6 +139,8 @@ class App:
             VK["F6"]: self.rollback,
             VK["F7"]: self.open_prompt,
             VK["F9"]: self.toggle_ui,
+            VK["F8"]: self.toggle_dev_view,
+            VK["F10"]: self.send_report,
         }
         self.inputs = InputMonitor(handlers, self._driver_key)
 
@@ -196,6 +210,12 @@ class App:
         if q:
             self.learner.say(f"Last 20 s: lane error avg {q['lat_err_mean']:.2f} m, max {q['lat_err_max']:.2f} m, "
                              f"steering reversals {q['steer_reversals_per_s']:.1f}/s")
+        if why != "F1" or speed > 5:
+            try:
+                self.reporter.report(f"disengage {why}", f"{plan.mode.value}: {plan.reason}" if plan else "",
+                                     auto=True)
+            except Exception:  # noqa: BLE001
+                pass
         if why == "takeover" or speed > 5:
             try:
                 self.driver.tel.dump_csv(_ROOT / "data" / "logs")
@@ -214,6 +234,14 @@ class App:
         self.planner.auto.blinker.driver_pressed(direction)
         msg = self.planner.turns.press(direction, time.perf_counter())
         self.learner.say(msg)
+
+    def toggle_dev_view(self) -> None:
+        self.dev_view = not self.dev_view
+        self.learner.say("Developer view ON (lines, boxes, numbers)" if self.dev_view else "Developer view off")
+
+    def send_report(self) -> None:
+        self.learner.say("Making a report of the last 30 s (F10)...")
+        self.reporter.report("F10 pressed")
 
     def toggle_training(self) -> None:
         on = self.trainrec.toggle()
@@ -274,7 +302,8 @@ class App:
         # where our own dashboard sits inside this picture (blacked out later on the SMALL
         # pictures - copying a 4K frame just to paint a box cost ~10 ms a frame)
         self._ui_in_crop = None
-        if self.ui_rect is not None and not isinstance(self.capture, FileSource):
+        if self.ui_rect is not None and not isinstance(self.capture, FileSource) \
+                and not getattr(self, "ui_capture_hidden", False):
             ux, uy, uw, uh = self.ui_rect
             ux, uy = ux - x0, uy - y0
             fh, fw = frame.shape[:2]
@@ -318,6 +347,8 @@ class App:
             frame = self.crop_game(frame)
             k = max(1, int(frame.shape[1] / width / 1.5))
             work = frame[::k, ::k] if k > 1 else frame
+            if work.ndim == 3 and work.shape[2] == 4:
+                work = np.ascontiguousarray(work[:, :, :3])
         key = (id(work), width, height)
         if getattr(self, "_view_key", None) != key:
             # the ~960 px picture FSD already made: no 4K resize 60 times a second
@@ -388,6 +419,10 @@ class App:
                 err = log_error("control loop")
                 self.actuator.release_all()
                 self.learner.say(f"recovered from an error ({err}) - see data/logs/errors.log")
+                try:
+                    self.reporter.report("error", err, auto=True)
+                except Exception:  # noqa: BLE001
+                    pass
                 if self.engaged and fails >= 3:
                     self.disengage("errors")
                 time.sleep(0.2)
@@ -454,6 +489,7 @@ class App:
                 if plan.mode == Mode.FAULT and w.speed_kph < 2:
                     self.disengage("lost road")
             plan.steer, plan.pedal = steer, pedal
+            self.reporter.add(now, w, plan, steer, pedal)
             if self.paused_reason:
                 plan.alert = self.paused_reason
 
@@ -543,6 +579,8 @@ class App:
             self.learner.say(line)
         discord().embed("Health check: all good" if rep.ok else "Health check: needs attention",
                         "\n".join(rep.lines)[:1800], BLUE if rep.ok else ORANGE)
+        if not rep.ok and getattr(self, "reporter", None) is not None:
+            self.reporter.report("health check", "\n".join(rep.lines)[:600], auto=True)
 
     def _health_later(self) -> None:
         for wait in (15.0, 60.0):

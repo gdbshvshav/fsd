@@ -21,6 +21,8 @@ class LaneLine:
     color: str = "white"                 # "white" | "yellow"
     dashed: bool = False
     conf: float = 0.0
+    x_min: float = 0.0                   # nearest distance it was actually seen at (m; negative = beside/behind)
+    pixels: int = 0                      # paint pixels behind it
 
     def y_at(self, x: float) -> float:
         a, b, c = self.coeffs

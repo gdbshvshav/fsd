@@ -136,6 +136,37 @@ class DigitReader:
             return None
         return int(val), float(worst)
 
+    # ---- kept between runs: before this, every start had to re-learn the digits from the slow
+    # OCR, so for the first minutes of every drive the speed was up to ~2 s old ----
+    def save(self, path) -> None:
+        from pathlib import Path
+        path = Path(path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            arrs = {f"d{d}": np.stack(ex) for d, ex in self.examples.items() if ex}
+            if arrs:
+                tmp = path.with_suffix(".tmp.npz")
+                np.savez_compressed(tmp, **arrs)
+                tmp.replace(path)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def load(self, path) -> bool:
+        from pathlib import Path
+        path = Path(path)
+        if not path.exists():
+            return False
+        try:
+            with np.load(path) as z:
+                for d in range(10):
+                    k = f"d{d}"
+                    if k in z.files:
+                        ex = [e.astype(np.float32) for e in z[k] if e.shape == (GH, GW)]
+                        self.examples[str(d)] = ex[: self.max_per]
+            return self.known > 0
+        except Exception:  # noqa: BLE001
+            return False
+
     def check(self, digits_value: int, mine: int | None) -> None:
         if mine is not None:
             self.agree += int(mine == digits_value)

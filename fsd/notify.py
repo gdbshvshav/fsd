@@ -54,7 +54,7 @@ class Discord:
                            for n, v, inl in fields[:25]]
         if footer:
             e["footer"] = {"text": footer[:2000]}
-        if files:
+        if files and Path(files[0]).suffix.lower() in (".jpg", ".jpeg", ".png"):
             e["image"] = {"url": f"attachment://{Path(files[0]).name}"}
         try:
             self.q.put_nowait(("embed", e, [Path(f) for f in (files or [])][:10]))
@@ -109,7 +109,10 @@ class Discord:
                         if f.exists():
                             h = open(f, "rb")
                             handles.append(h)
-                            multipart[f"files[{i}]"] = (f.name, h, "image/jpeg")
+                            mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                                    ".zip": "application/zip", ".txt": "text/plain",
+                                    ".csv": "text/csv"}.get(f.suffix.lower(), "application/octet-stream")
+                            multipart[f"files[{i}]"] = (f.name, h, mime)
                     try:
                         r = requests.post(self.url, data={"payload_json": json.dumps(body)}, files=multipart,
                                           timeout=20)

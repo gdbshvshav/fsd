@@ -345,8 +345,17 @@ class LaneFinder:
 
     @staticmethod
     def _pick(cands: list[LaneLine], lane_width: float):
-        lefts = sorted([c for c in cands if -lane_width * 1.25 < c.y_at(6) < -0.4], key=lambda c: -c.y_at(6))
-        rights = sorted([c for c in cands if 0.4 < c.y_at(6) < lane_width * 1.25], key=lambda c: c.y_at(6))
+        """Your lane's two lines: on each side the line nearest the middle of the car.
+        Not considered: specks (the screen finder counts pixels; < 30 with low confidence is a speck - far specks
+        near the horizon used to extrapolate to right next to the car and win)."""
+        def ok(c):
+            # a few pixels seen only far ahead, extrapolated back to the car = not a lane edge
+            # (far dashes of the real edge, ~half a lane out, are kept: on a bend behind a truck
+            # they can be all there is)
+            return not (0 < c.pixels < 30 and (c.conf < 0.25 or (c.x_min > 25.0 and abs(c.y_at(6)) < 1.2)))
+        cs = [c for c in cands if ok(c)]
+        lefts = sorted([c for c in cs if -lane_width * 1.25 < c.y_at(6) < -0.4], key=lambda c: -c.y_at(6))
+        rights = sorted([c for c in cs if 0.4 < c.y_at(6) < lane_width * 1.25], key=lambda c: c.y_at(6))
         left = lefts[0] if lefts else None
         right = rights[0] if rights else None
         if left and right:
@@ -356,8 +365,8 @@ class LaneFinder:
                     right = None
                 else:
                     left = None
-        left2 = next((c for c in cands if left and -lane_width * 1.6 < c.y_at(6) - left.y_at(6) < -2.4), None)
-        right2 = next((c for c in cands if right and 2.4 < c.y_at(6) - right.y_at(6) < lane_width * 1.6), None)
+        left2 = next((c for c in cs if left and -lane_width * 1.6 < c.y_at(6) - left.y_at(6) < -2.4), None)
+        right2 = next((c for c in cs if right and 2.4 < c.y_at(6) - right.y_at(6) < lane_width * 1.6), None)
         return left, right, left2, right2
 
     @staticmethod

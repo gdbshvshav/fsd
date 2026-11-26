@@ -158,6 +158,10 @@ def from_lines(L: np.ndarray, R: np.ndarray, W: int, H: int, cal: Calibration,
         "bumper_to_quad_m": 1.0,
         "cam_to_bumper_m": round(float(cam_to_bumper), 2),
     }
+    from ..settings import quad_problem
+    bad = quad_problem(fields["src_quad"])
+    if bad:
+        return None, f"Calibration came out wrong ({bad}); keeping the old one."
     return fields, (f"horizon at {y_h / H:.0%} of screen, camera {cam_to_bumper:.0f} m behind your front bumper, "
                     f"road view {near - cam_to_bumper:.0f}-{far - cam_to_bumper:.0f} m ahead.")
 

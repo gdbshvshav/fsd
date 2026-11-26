@@ -126,7 +126,8 @@ class Dashboard:
         self.show_minimap = True
         self._dt = 1 / 60
         # smoother UI when the PC has cores to spare (the vision runs in other processes)
-        self.ui_fps = 60 if (os.cpu_count() or 2) >= 6 else 30
+        # 30 is plenty for the animations and leaves the CPU to the driving loop
+        self.ui_fps = int(getattr(st, "ui_fps", 30) or 30)
 
     # ---------------- window management (Windows) ----------------
     _u32 = None
@@ -170,6 +171,19 @@ class Dashboard:
                 u.SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
                 u.SetLayeredWindowAttributes(self.hwnd, 0, int(255 * max(0.3, min(1.0, opacity))), LWA_ALPHA)
             self._keep_on_top(force=True)
+            # Hide this window from screen capture (Windows 10 2004+): FSD's own camera then sees
+            # the GAME underneath instead of our dashboard - no blacked-out hole in its view.
+            try:
+                import ctypes
+                from ctypes import wintypes
+                u.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+                u.SetWindowDisplayAffinity.restype = wintypes.BOOL
+                WDA_EXCLUDEFROMCAPTURE = 0x11
+                if not getattr(self.app.settings, "ui_hide_from_capture", True):
+                    raise RuntimeError("off")
+                self.app.ui_capture_hidden = bool(u.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE))
+            except Exception:  # noqa: BLE001
+                self.app.ui_capture_hidden = False
         except Exception:  # noqa: BLE001
             self.hwnd = None
 
@@ -277,6 +291,8 @@ class Dashboard:
         if ev.key == pygame.K_h and hasattr(self.app, "run_health"):
             import threading
             threading.Thread(target=self.app.run_health, daemon=True).start()
+        if ev.key == pygame.K_d and hasattr(self.app, "toggle_dev_view"):
+            self.app.toggle_dev_view()
         if ev.key == pygame.K_v:
             self.view = "3d" if self.view == "camera" else "camera"
             self.app.want_debug_img = self.view == "3d"
@@ -294,6 +310,11 @@ class Dashboard:
             self._rect_t = time.time()
             from ..winput import window_rect
             self.app.ui_rect = window_rect(self.hwnd)     # so FSD ignores its own window
+        if getattr(self.app, "dev_view", False):
+            self._draw_dev_view(snap, w, plan)
+            if self.app.prompt_open:
+                self._draw_prompt()
+            return
         if self.view == "camera":
             self.blink = (self.blink + dt) % 1.0
             self._draw_camera_view(snap, w, plan)
@@ -334,6 +355,36 @@ class Dashboard:
         if self.app.prompt_open:
             self._draw_prompt()
 
+    # ================= developer view: every line, box and number FSD uses =================
+    def _draw_dev_view(self, snap, w, plan) -> None:
+        """F8 / D. Drawn ~20x a second (it's a debug picture, not an animation)."""
+        now = time.time()
+        work = getattr(self.app, "_last_work", None)
+        if work is None or w is None:
+            self.screen.fill(BG)
+            self._text(self.f_med, "Developer view: waiting for the game screen...", DIM,
+                       (self.W // 2, self.H // 2), "center")
+            return
+        if now - getattr(self, "_dev_t", 0.0) > 0.05 or getattr(self, "_dev_surf", None) is None:
+            self._dev_t = now
+            import cv2
+            from .devview import render
+            try:
+                info = self.app.reporter.info()
+            except Exception:  # noqa: BLE001
+                info = {}
+            img = render(work, w, self.app.perception, plan, info, out_w=self.W)
+            if img.shape[0] != self.H:
+                canvas = np.zeros((self.H, self.W, 3), np.uint8)
+                h = min(self.H, img.shape[0])
+                y0 = (self.H - h) // 2
+                canvas[y0:y0 + h] = img[:h]
+                img = canvas
+            self._dev_surf = pygame.image.frombuffer(img[:, :, ::-1].tobytes(), (self.W, self.H), "RGB")
+        self.screen.blit(self._dev_surf, (0, 0))
+        self._text(self.f_small, "DEV VIEW  F8/D: back   F10: send report", (255, 210, 90),
+                   (self.W - 8, self.H - 6), "bottomright")
+
     # ================= camera view: your game, greyed, with highlights =================
     def _draw_camera_view(self, snap, w, plan) -> None:
         """Your game in grey; everything FSD detects shown in its REAL colours,
@@ -341,6 +392,13 @@ class Dashboard:
         stop lines / crosswalks, other cars, people, cones, lights and signs."""
         import cv2
         Wv, Hv = self.W, self.H
+        # the camera picture only changes when the game frame does: rebuild it then, not 60x a
+        # second (that work competed with the driving loop for the same CPU lock)
+        key = (id(getattr(self.app, "_last_work", None)), Wv, Hv, id(w), id(plan))
+        if key == getattr(self, "_cam_key", None) and getattr(self, "_cam_surf", None) is not None:
+            self.screen.blit(self._cam_surf, (0, 0))
+            self._draw_hud(snap, w, plan)
+            return
         img = self.app.view_frame(Wv, Hv)
         if img is None:
             self.screen.fill(BG)
@@ -431,6 +489,7 @@ class Dashboard:
                 cv2.putText(out, f"{plan.lead.x:.0f} m", (int(x1 * sx), max(12, int(y1 * sy) - 5)), 0, 0.5,
                             (255, 170, 60), 1, cv2.LINE_AA)
         surf = pygame.image.frombuffer(out[:, :, ::-1].tobytes(), (Wv, Hv), "RGB")
+        self._cam_key, self._cam_surf = key, surf
         self.screen.blit(surf, (0, 0))
         self._draw_hud(snap, w, plan)
 
@@ -467,7 +526,7 @@ class Dashboard:
         r = st.get("min_radius_town")
         if r and r < 100:
             q += f" · turn radius {r:.0f} m"
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map · R sides · H check   {st.get('fps', 0):.0f} fps{lanes}"
+        keys = (f"F1 FSD · Q/E turn · F8 dev view · F10 report · F9 hide · V view · M map · H check   {st.get('fps', 0):.0f} fps{lanes}"
                 f" · lights {st.get('lights_fps', 0):.0f}/s · v{st.get('params', 0)}{q}")
         if st.get("warn"):
             keys = st["warn"] + " · " + keys
@@ -694,7 +753,7 @@ class Dashboard:
                 f"{st.get('ocr', '')}")
         self._text(self.f_small, foot[:(60 if self.compact else 90)], (90, 94, 104),
                    (int(self.W * 0.01), self.H - self.line_h - 2))
-        keys = ("F1 FSD · Q/E turn · F9 hide/show this · drag to move" if self.compact else
+        keys = ("F1 FSD · Q/E turn · F8 dev view · F10 report · F9 hide · drag to move" if self.compact else
                 "F1 FSD · Q/E turn · F2 train rec · F3 camera · F4 calibrate · F6 undo fix · F7 note · F9 hide · C cam")
         self._text(self.f_small, keys, (90, 94, 104), (int(self.W * 0.01), self.H - 2 * self.line_h - 4))
 

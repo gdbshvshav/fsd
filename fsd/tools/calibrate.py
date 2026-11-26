@@ -22,7 +22,7 @@ from ..settings import Settings
 
 
 def grab_frames(s: Settings, n: int = 20, countdown: int = 5) -> list[np.ndarray]:
-    from ..capture import Capture
+    from ..capture import Capture, bgr
     for i in range(countdown, 0, -1):
         print(f"  switch to Roblox... {i}")
         time.sleep(1)
@@ -32,7 +32,7 @@ def grab_frames(s: Settings, n: int = 20, countdown: int = 5) -> list[np.ndarray
     while len(frames) < n and time.time() - t0 < 10:
         f, _, seq = cap.latest()
         if f is not None and seq != last:
-            frames.append(f.copy())
+            frames.append(bgr(f).copy())
             last = seq
         time.sleep(0.05)
     cap.stop()

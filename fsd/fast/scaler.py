@@ -37,7 +37,9 @@ class FramePair:
 
     def __init__(self, frame: np.ndarray, work_w: int = 960, fine_w: int = 1920):
         self.full_h, self.full_w = frame.shape[:2]
-        self.fine = shrink_to(frame, fine_w)
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            frame = frame[:, :, :3]          # BGRA from the capture: a view, no copy (see capture.py)
+        self.fine = shrink_to(frame, fine_w)  # usually a strided view: copied only where needed
         self.work = shrink_to(self.fine, work_w)
         if not self.work.flags["C_CONTIGUOUS"]:
             self.work = np.ascontiguousarray(self.work)

@@ -171,3 +171,69 @@ class EgoShape:
             return
         sub = m[max(0, -b):max(0, -b) + (b2 - max(0, b)), max(0, -a):max(0, -a) + (a2 - max(0, a))]
         target_mask[max(0, b):b2, max(0, a):a2] |= np.where(sub > 127, 255, 0).astype(np.uint8)
+
+
+class EgoHome:
+    """Where our car usually sits on screen. Starts at the calibration's ego box and follows
+    the camera: if the car outline keeps landing somewhere else (you zoomed in or out, or a
+    bigger vehicle), and agrees with itself several times in a row, that becomes the new home.
+    Before this, a zoomed-in camera made every outline 'insane' and the car showed as a square."""
+
+    def __init__(self, box, W: int, H: int, need: int = 4):
+        self.box = tuple(int(v) for v in box)
+        self.W, self.H = W, H
+        self.need = need
+        self._cand = None
+        self._n = 0
+        self.moved = 0
+        self.moving = False        # set by the engine: the outline method needs the road to move
+        self.orig = self.box
+
+    def plausible(self, bb) -> bool:
+        x1, y1, x2, y2 = bb
+        w, h = x2 - x1, y2 - y1
+        cx, cy = (x1 + x2) / 2 / self.W, (y1 + y2) / 2 / self.H
+        return (0.04 * self.W < w < 0.32 * self.W and 0.05 * self.H < h < 0.45 * self.H
+                and 0.36 < cx < 0.64 and 0.33 < cy < 0.88 and 0.5 < w / max(1, h) < 2.8)
+
+    def sane(self, bb) -> bool:
+        x1, y1, x2, y2 = bb
+        hx1, hy1, hx2, hy2 = self.box
+        hw_, hh_ = hx2 - hx1, hy2 - hy1
+        cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+        return (abs(cx - (hx1 + hx2) / 2) < 0.35 * hw_ and abs(cy - (hy1 + hy2) / 2) < 0.35 * hh_
+                and 0.5 * hw_ < bw < 1.5 * hw_ and 0.5 * hh_ < bh < 1.5 * hh_ and y1 > hy1 - 0.12 * hh_)
+
+    def judge(self, bb) -> bool:
+        """True when this outline can be used. May move the home."""
+        if bb is None:
+            return False
+        if self.sane(bb):
+            self._n = 0
+            return True
+        ow, oh = self.orig[2] - self.orig[0], self.orig[3] - self.orig[1]
+        bw, bh = bb[2] - bb[0], bb[3] - bb[1]
+        # standing still the outline can grow onto the (also still) road: only learn while moving,
+        # and never more than ~1.7x / 0.55x the calibrated car size
+        if not self.moving or not self.plausible(bb) or not (0.55 * ow < bw < 1.7 * ow and 0.55 * oh < bh < 1.7 * oh):
+            self._n = 0
+            return False
+        if self._cand is not None and _iou(bb, self._cand) > 0.6:
+            self._n += 1
+        else:
+            self._cand, self._n = tuple(bb), 1
+        if self._n >= self.need:
+            x1, y1, x2, y2 = bb
+            self.box = (int(x1), int(y1), int(x2), int(y2))
+            self._n = 0
+            self.moved += 1
+            return True
+        return False
+
+
+def _iou(a, b) -> float:
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / ua if ua > 0 else 0.0

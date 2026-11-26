@@ -36,6 +36,7 @@ class Capture:
         self._stop.set()
 
     def latest(self) -> tuple[np.ndarray | None, float, int]:
+        """Newest frame - may have 4 channels (BGRA); use bgr() or FramePair to get BGR."""
         with self._lock:
             return self._frame, self._stamp, self._seq
 
@@ -63,7 +64,10 @@ class Capture:
     def _run_dxcam(self) -> None:
         import dxcam  # type: ignore
 
-        cam = dxcam.create(output_idx=self.monitor, output_color="BGR")
+        # BGRA = dxcam's own buffer, no colour conversion. Converting EVERY 4K frame (60 a second,
+        # most never used) cost a big share of a core; FramePair drops the 4th channel only for
+        # the frames we actually process, after shrinking them.
+        cam = dxcam.create(output_idx=self.monitor, output_color="BGRA")
         if cam is None:
             raise RuntimeError("dxcam.create returned None")
         cam.start(target_fps=self.fps, video_mode=True)
@@ -72,7 +76,7 @@ class Capture:
             while not self._stop.is_set():
                 f = cam.get_latest_frame()
                 if f is not None:
-                    self._publish(np.ascontiguousarray(f))
+                    self._publish(f)
         finally:
             cam.stop()
 
@@ -85,8 +89,7 @@ class Capture:
             mon = sct.monitors[self.monitor + 1] if len(sct.monitors) > self.monitor + 1 else sct.monitors[1]
             while not self._stop.is_set():
                 t0 = time.perf_counter()
-                shot = np.asarray(sct.grab(mon))[:, :, :3]
-                self._publish(np.ascontiguousarray(shot))
+                self._publish(np.asarray(sct.grab(mon)))      # BGRA, see FramePair
                 dt = time.perf_counter() - t0
                 if dt < period:
                     time.sleep(period - dt)
@@ -124,3 +127,10 @@ class FileSource:
                 img = cv2.resize(img, (1920, int(img.shape[0] * 1920 / img.shape[1])))
             self._cache = {idx: img}
         return self._cache[idx], time.perf_counter(), tick + 1
+
+
+def bgr(frame: np.ndarray) -> np.ndarray:
+    """3-channel contiguous copy/view of a captured frame (drops alpha)."""
+    if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
+        return np.ascontiguousarray(frame[:, :, :3])
+    return frame

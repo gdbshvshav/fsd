@@ -157,6 +157,8 @@ class FastPerception:
         x1, y1, x2, y2 = self.cal.ego_mask
         self.ego_box = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
         self.ego_home = self.ego_box            # where the car normally sits; the outline may not wander off
+        from ..perception.ego_shape import EgoHome
+        self.home = EgoHome(self.ego_home, W, H)
         self.ego_shape = EgoShape()
 
     def _rebuild_geometry(self, W: int, H: int) -> None:
@@ -213,13 +215,10 @@ class FastPerception:
         if bb is not None:
             x1, y1, x2, y2 = bb
             cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
-            hx1, hy1, hx2, hy2 = self.ego_home
-            hw_, hh_ = hx2 - hx1, hy2 - hy1
-            # the outline may follow the car (zoom, other vehicles) but never balloon over the road:
-            # at most ~1.5x the usual car size, centred near the usual spot
-            sane = (abs(cx - (hx1 + hx2) / 2) < 0.35 * hw_ and abs(cy - (hy1 + hy2) / 2) < 0.35 * hh_
-                    and 0.5 * hw_ < bw < 1.5 * hw_ and 0.5 * hh_ < bh < 1.5 * hh_
-                    and y1 > hy1 - 0.12 * hh_)
+            # the outline may follow the car but never balloon over the road (EgoHome: near the usual
+            # spot and size - and the usual spot itself follows the camera zoom)
+            sane = self.home.judge(bb)
+            self.ego_home = self.home.box
             if sane:
                 m = 0.06
                 target = (x1 - m * bw, y1 - m * bh, x2 + m * bw, y2 + m * bh)
@@ -245,8 +244,7 @@ class FastPerception:
             mask[max(0, hy1 + ch):hy2 - ch, max(0, hx1 + cw):hx2 - cw] = 255
             mask = cv2.dilate(mask, np.ones((7, 7), np.uint8))
         else:
-            x1, y1, x2, y2 = self.ego_box
-            mask[max(0, y1):y2, max(0, x1):x2] = 255
+            mask = box_mask(self.ego_box, H, W)
         return mask
 
     def _is_ego(self, box) -> bool:
@@ -422,9 +420,7 @@ class FastPerception:
         if self.geo is None or self.geo.W != W or self.geo.H != H:
             self._setup(W, H)
         if ego_mask is None or ego_mask.shape != (H, W):
-            ego_mask = np.zeros((H, W), np.uint8)
-            x1, y1, x2, y2 = self.ego_box
-            ego_mask[max(0, y1):y2, max(0, x1):x2] = 255
+            ego_mask = box_mask(self.ego_box, H, W)
         frame = self._brighten(frame, W, H)
         res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
         cal_fields = self.autocal.add(res.ego_pair_screen, W, H, ego_rear, t)
@@ -465,7 +461,10 @@ class FastPerception:
             hidden = hidden_from_box(geo, self.ego_box, frame.shape[1])
             c = w.lanes.center[2] if w.lanes.conf > 0.4 else 0.0
             prior = w.speed_kph / 3.6 if w.speed_valid else None
-            return self.vo.update(frame, geo, t, hidden, c, v_prior=prior)
+            r = self.vo.update(frame, geo, t, hidden, c, v_prior=prior)
+            if getattr(self, "home", None) is not None:
+                self.home.moving = bool(r is not None and r.ok and r.v > 3.0)
+            return r
         except Exception:  # noqa: BLE001 - never break perception
             return None
 
@@ -504,3 +503,16 @@ class FastPerception:
         for b in (self._bg_ego, self._bg_objs):
             if b is not None:
                 b.stop()
+
+
+def box_mask(box, H: int, W: int) -> np.ndarray:
+    """Mask for our car when only its box is known (no outline yet). Generous below and to the
+    sides: with a zoomed-in camera the car pokes out of the box, and its bright rear lights,
+    plate and body edge then got linked into the lane line beside it (a phantom line 0.9 m
+    from the middle of the car)."""
+    x1, y1, x2, y2 = (int(v) for v in box)
+    bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+    m = np.zeros((H, W), np.uint8)
+    m[max(0, y1 - int(0.03 * bh)):min(H, y2 + int(0.35 * bh)),
+      max(0, x1 - int(0.04 * bw)):min(W, x2 + int(0.04 * bw))] = 255
+    return m

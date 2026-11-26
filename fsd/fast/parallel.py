@@ -275,6 +275,12 @@ class ParallelPerception:
         x1, y1, x2, y2 = self.cal.ego_mask
         self.ego_home = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
         self.ego_box = self.ego_home
+        from ..perception.ego_shape import EgoHome
+        old_home = getattr(self, "home", None)
+        self.home = EgoHome(self.ego_home, W, H)
+        if old_home is not None and old_home.moved and (old_home.W, old_home.H) == (W, H):
+            self.home.box = old_home.box          # keep what we learned about the camera
+            self.ego_home = self.ego_box = old_home.box
 
     def alive(self) -> bool:
         return bool(self.procs) and all(p.is_alive() for p in self.procs)
@@ -335,15 +341,14 @@ class ParallelPerception:
         if bbox is None:
             return
         x1, y1, x2, y2 = bbox
+        cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+        if not self.home.judge(bbox):
+            # keep showing the last good outline (not a square); just don't follow this one
+            self.ego_box = tuple(int(0.8 * e + 0.2 * h) for e, h in zip(self.ego_box, self.ego_home))
+            return
+        self.ego_home = self.home.box
         hx1, hy1, hx2, hy2 = self.ego_home
         hw_, hh_ = hx2 - hx1, hy2 - hy1
-        cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
-        sane = (abs(cx - (hx1 + hx2) / 2) < 0.35 * hw_ and abs(cy - (hy1 + hy2) / 2) < 0.35 * hh_
-                and 0.5 * hw_ < bw < 1.5 * hw_ and 0.5 * hh_ < bh < 1.5 * hh_ and y1 > hy1 - 0.12 * hh_)
-        if not sane:
-            self.ego_shape.reset()
-            self.ego_box = self.ego_home
-            return
         self.ego_shape.mask, self.ego_shape.region, self.ego_shape.bbox = mask, region, bbox
         m = 0.06
         target = (x1 - m * bw, y1 - m * bh, x2 + m * bw, y2 + m * bh)
@@ -459,6 +464,8 @@ class ParallelPerception:
             c = w.lanes.center[2] if w.lanes.conf > 0.4 else 0.0
             w.vo = self.vo.update(frame, geo, t, hidden, c,
                                   v_prior=w.speed_kph / 3.6 if w.speed_valid else None)
+            if getattr(self, "home", None) is not None:
+                self.home.moving = bool(w.vo is not None and w.vo.ok and w.vo.v > 3.0)
         except Exception:  # noqa: BLE001
             w.vo = None
 
@@ -520,6 +527,9 @@ class ParallelPerception:
             "main_ms": self.ms,
             "lag_ms": self.lag_ms,
             "ocr": self.ocr.status if self.ocr else "off",
+            "speedo_digits": self.ocr.digits.known if self.ocr else 0,
+            "speedo_fast_reads": self.ocr.fast_reads if self.ocr else 0,
+            "speed_age_ms": (time.perf_counter() - self.ocr.speed_time) * 1000 if self.ocr and self.ocr.speed_time else -1,
             "autocal": self.autocal_message,
             "error": self.error,
         }

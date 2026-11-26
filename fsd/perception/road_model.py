@@ -237,6 +237,12 @@ class RoadModel:
         width = (rc[2] - lc[2]) if lc and rc else 0.0
         if not (2.5 < width < 30.0):
             return e
+        # the two edges must stay apart and roughly parallel along the whole stretch we use
+        # (crossing edges = something else, e.g. a kerb + a shadow - never steer by those)
+        xs_chk = np.linspace(0.0, max(8.0, min(lmax, rmax)), 8)
+        gap = np.polyval(rc, xs_chk) - np.polyval(lc, xs_chk)
+        if gap.min() < 2.5 or abs(rc[1] - lc[1]) > 0.35:
+            return e
         self._smooth_w = width if self._smooth_w is None else 0.85 * self._smooth_w + 0.15 * width
         conf = float(np.clip(min(len(L), len(R)) / 12.0, 0, 1) * np.clip(1.0 - (lres + rres) / 2.0, 0, 1))
         return RoadEdges(True, lc, rc, min(lmax, rmax), self._smooth_w, conf, samples)

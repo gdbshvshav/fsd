@@ -126,6 +126,11 @@ class OcrWorker:
         self.status = "starting"
         from .speedo_digits import DigitReader
         self.digits = DigitReader()
+        from pathlib import Path
+        self.digits_path = Path("data") / "learned" / "speedo_digits.npz"
+        self.digits.load(self.digits_path)
+        self._digits_saved_reads = self.digits.reads
+        self._digits_saved_t = time.perf_counter()
         self._fast_pending: float | None = None
         self.fast_reads = 0
 
@@ -160,6 +165,8 @@ class OcrWorker:
 
     def stop(self) -> None:
         self._stop.set()
+        if self.digits.reads > self._digits_saved_reads:
+            self.digits.save(self.digits_path)
 
     def submit(self, frame: np.ndarray, sign_crops: list[np.ndarray] | None = None) -> None:
         with self._lock:
@@ -226,7 +233,11 @@ class OcrWorker:
                 self._misses = 0
             return
         self._misses = 0
-        self.digits.learn(crop, str(int(val)))            # teach the fast digit reader
+        if self.digits.learn(crop, str(int(val))):       # teach the fast digit reader
+            if self.digits.reads > self._digits_saved_reads and time.perf_counter() - self._digits_saved_t > 20:
+                self._digits_saved_t = time.perf_counter()
+                self._digits_saved_reads = self.digits.reads
+                self.digits.save(self.digits_path)
         if self.digits.known >= 2 and time.perf_counter() - self.speed_time < 0.3:
             return                                         # the fast reader is keeping up
         kph = val * KPH_PER_MPH if self.unit == "mph" else val

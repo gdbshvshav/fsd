@@ -76,7 +76,9 @@ class PaintFinder:
         road = (((Sv < 52) & (V > 16) & (V < 210)) | shadow).astype(np.uint8) * 255
         grass = (Hh >= 33) & (Hh <= 95) & (Sv > 55)
         yellow_c = (Hh >= 14) & (Hh <= 34) & (Sv > 70) & (V > 90)
-        whiteish = ((Sl < 95) | ((Hh >= 95) & (Hh <= 130))) & ~grass
+        # HSV saturation, not HLS: on sunny concrete ER:LC's white paint is warm (237,218,200) and
+        # HLS calls that 51% saturated, so the dashes on highways were thrown away
+        whiteish = ((Sv < 75) | ((Hh >= 95) & (Hh <= 130))) & ~grass & ~yellow_c
 
         paint = np.zeros_like(L)
         yel = np.zeros_like(L)

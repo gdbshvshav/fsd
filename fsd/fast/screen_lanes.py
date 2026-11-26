@@ -275,8 +275,12 @@ class ScreenLaneFinder:
             for j in order[ii + 1:]:
                 xj, lj, hj = segs[j][0], segs[j][1], segs[j][2]
                 gap = xj - xi
-                if gap > 30:
+                if gap > 80:
                     break
+                # pieces of one line hidden behind our car are far apart centre to centre but
+                # close end to end - judge the hole between them, not the centres
+                if segs[j][9] - segs[i][10] > 30:
+                    continue
                 if abs(hi - hj) > 0.55:
                     continue
                 if (segs[i][6] > 0.4) != (segs[j][6] > 0.4):
@@ -309,9 +313,16 @@ class ScreenLaneFinder:
                 continue
             fill = min(1.0, total / max(span, 1e-3))
             yfrac = float(np.average([segs[i][6] for i in idxs], weights=[segs[i][3] for i in idxs]))
+            d_min = float(d.min())
+            if d_min > 45.0:
+                continue                      # seen only near the horizon: a few pixels, can't be trusted
+            npx = int(d.size)
+            # confidence keeps its old meaning (the driving filter weighs lanes by it); far specks are
+            # handled by d_min / pixel count instead (see _pick)
             conf = float(min(1.0, total / 8.0) * max(0.0, 1.0 - rms / 0.45) * min(1.0, span / 12.0))
             line = LaneLine((float(coef[0]), float(coef[1]), float(coef[2])), float(d.max()),
-                            "yellow" if yfrac > 0.4 else "white", bool(fill < 0.75 and len(idxs) >= 2), conf)
+                            "yellow" if yfrac > 0.4 else "white", bool(fill < 0.75 and len(idxs) >= 2), conf,
+                            d_min, npx)
             pts = np.concatenate([segs[i][7] for i in idxs])
             pts = pts[np.argsort(pts[:, 1])]
             out.append((line, pts.astype(np.int32)))
@@ -408,8 +419,9 @@ class ScreenLaneFinder:
         lines = [c[0] for c in cands]
         left, right, left2, right2 = LaneFinder._pick(lines, lane_width)
 
-        sl = self._blend(left, self.prev_left if t - self.seen_left < 0.6 else None, smoothing)
-        sr = self._blend(right, self.prev_right if t - self.seen_right < 0.6 else None, smoothing)
+        half = lane_width / 2
+        sl = self._blend(left, self.prev_left if t - self.seen_left < 0.6 else None, smoothing, -half)
+        sr = self._blend(right, self.prev_right if t - self.seen_right < 0.6 else None, smoothing, half)
         if left is not None:
             self.seen_left = t
         elif sl is not None:
@@ -450,13 +462,17 @@ class ScreenLaneFinder:
         return res
 
     @staticmethod
-    def _blend(new: LaneLine | None, old: LaneLine | None, alpha: float) -> LaneLine | None:
+    def _blend(new: LaneLine | None, old: LaneLine | None, alpha: float, expect: float = 0.0) -> LaneLine | None:
         if new is None:
             return old
         if old is None:
             return new
         if abs(new.y_at(8) - old.y_at(8)) > 1.4:
-            return new if new.conf > old.conf + 0.25 else old
+            # a different line: keep the old one only if the new isn't clearly a better lane edge.
+            # (Before, a wrong line locked in early - e.g. the far road edge - could never be replaced.)
+            def fit(l):
+                return l.conf * math.exp(-((l.y_at(2) - expect) / 1.1) ** 2) if expect else l.conf
+            return new if (new.conf > old.conf + 0.25 or fit(new) > fit(old) + 0.15) else old
         c = tuple(alpha * o + (1 - alpha) * n for o, n in zip(old.coeffs, new.coeffs))
         return LaneLine(c, new.x_max, new.color, new.dashed, max(new.conf, 0.85 * old.conf))
 

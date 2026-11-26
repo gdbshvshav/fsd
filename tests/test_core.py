@@ -227,18 +227,42 @@ def test_turn_queue_cancel_switch():
 def test_turn_preview_and_execute():
     tm = TurnManager()
     tm.press("right", 0)
-    w = straight_world(20, stop_line_dist=30.0)
-    tm.update(w, P, 0.05, 0.1, {"left": True, "right": True})
+    t = 0.0
+    for i in range(10):                                        # a junction seen while driving toward it
+        t += 0.05
+        w = straight_world(20, stop_line_dist=30.0 - 20 / 3.6 * t)
+        tm.update(w, P, 0.05, t, {"left": True, "right": True})
     assert tm.s.preview and tm.s.preview[-1][1] > 5           # path ends to the right
-    # drive past the line: cue disappears, dead-reckoning takes over
+    # drive past the line: cue disappears, dead-reckoning takes over; the right line ends at the junction
     w2 = straight_world(20)
-    t = 0.1
+    w2.lanes.right = LaneLine((0, 0, 1.85), 3.0, conf=0.9)
     for _ in range(200):
         t += 0.05
         tm.update(w2, P, 0.05, t, {"left": True, "right": True})
         if tm.s.active:
             break
     assert tm.s.active
+
+
+def test_turn_needs_confirmed_junction_and_an_opening():
+    # one frame of 'crosswalk' paint must not start a turn
+    tm = TurnManager()
+    tm.press("right", 0)
+    tm.update(straight_world(20, crosswalk_dist=2.0), P, 0.05, 0.05, {"left": True, "right": True})
+    for i in range(40):
+        tm.update(straight_world(20), P, 0.05, 0.1 + i * 0.05, {"left": True, "right": True})
+    assert not tm.s.active and not tm.s.preview
+    # a confirmed junction, but a solid line keeps going on the right: no turn into the barrier
+    tm = TurnManager()
+    tm.press("right", 0)
+    t = 0.0
+    for i in range(10):
+        t += 0.05
+        tm.update(straight_world(20, stop_line_dist=12.0 - 20 / 3.6 * t), P, 0.05, t, {"left": True, "right": True})
+    for i in range(120):
+        t += 0.05
+        tm.update(straight_world(20), P, 0.05, t, {"left": True, "right": True})
+    assert not tm.s.active
 
 
 def test_lane_change_on_dashed_line():

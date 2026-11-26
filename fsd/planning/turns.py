@@ -70,6 +70,7 @@ class TurnManager:
         st.pending = direction
         st.since = now
         st.junction_d = None
+        self._cue_d, self._cue_hits, self._cue_first = None, 0, 0.0
         st.message = f"{direction.title()} turn queued"
         return st.message
 
@@ -118,8 +119,13 @@ class TurnManager:
         st.message = f"Moving {direction} - getting in lane for the turn"
         return st.message
 
+    _cue_d = None         # junction cue tracking (see update)
+    _cue_hits = 0
+    _cue_first = 0.0
+
     def cancel(self) -> None:
         self.s = TurnState()
+        self._cue_d, self._cue_hits, self._cue_first = None, 0, 0.0
 
     # ---- per-frame ----
     model = None          # drive.turning.TurningModel (set by the app/simulator): this car's real lock
@@ -169,10 +175,25 @@ class TurnManager:
         cues = [d for d in (w.stop_line_dist, w.crosswalk_dist, w.stop_sign_dist) if d < 900]
         if w.signal.state.value not in ("none", "unknown") and w.signal.distance < 900:
             cues.append(max(2.0, w.signal.distance - p["light_to_stop_m"]))
+        # A junction must be CONFIRMED: seen in several frames, at distances that agree with us driving
+        # toward it. One frame of paint (a false crosswalk, a shadow) used to start a turn "in 0 m"
+        # and swerve the car toward a barrier.
         if cues:
-            st.junction_d = min(cues)
-        elif st.junction_d is not None:
-            st.junction_d -= v * dt                      # dead-reckon once paint is under the car
+            d_now = min(cues)
+            pred = None if self._cue_d is None else self._cue_d - v * dt
+            if pred is not None and abs(d_now - pred) < 4.0 + 0.3 * v * dt + 0.15 * d_now:
+                self._cue_hits += 1
+            else:
+                self._cue_hits = 1
+                self._cue_first = d_now
+            self._cue_d = d_now
+            if self._cue_hits >= 6 and (self._cue_first > 6.0 or v < 4.0):
+                st.junction_d = d_now
+        else:
+            if self._cue_d is not None:
+                self._cue_d -= v * dt
+            if st.junction_d is not None:
+                st.junction_d -= v * dt                  # dead-reckon once paint is under the car
 
         if st.junction_d is not None and st.junction_d < p["turn_preview_m"]:
             radius, v_turn, early, why = self.plan_turn(p, v)
@@ -184,6 +205,13 @@ class TurnManager:
             st.message = f"Turning {st.pending} at the junction in {max(0, st.junction_d):.0f} m{extra}"
             if entry <= 0.5 and st.pending == "left" and self.hold_left:
                 st.message = "Waiting for oncoming traffic before turning left"
+                return
+            # a solid line on the turn side that carries on past the corner = no road to turn into
+            side = w.lanes.right if st.pending == "right" else w.lanes.left
+            if entry <= 0.5 and side is not None and not side.dashed and side.conf > 0.5 \
+                    and side.x_max > max(0.0, st.junction_d) + 12.0 and w.lanes.conf > 0.5:
+                st.message = f"No opening to the {st.pending} yet - staying in lane"
+                st.preview = []
                 return
             if entry <= 0.5:
                 st.active = True
