@@ -26,13 +26,17 @@ import math
 
 
 class SteerObserver:
-    def __init__(self, rise: float = 3.9, ret: float = 6.0):
+    def __init__(self, rise: float = 3.9, ret: float = 6.0, dither: bool = True):
         self.rise = rise
         self.ret = ret
         self.s = 0.0                # estimated steering value, -1..1
+        self.dither = dither
+        self.acc = 0.0              # running sum of (held value - wanted value) x time
+        self._target = 0.0
 
     def reset(self) -> None:
         self.s = 0.0
+        self.acc = 0.0
 
     def predict(self, key: int, dt: float) -> float:
         """Steering value after holding `key` (-1 = A, 0 = none, +1 = D) for dt."""
@@ -49,17 +53,46 @@ class SteerObserver:
         return s
 
     def choose(self, target: float, dt: float) -> int:
-        """Key for this frame that brings the steering value closest to target."""
+        """Key for this frame.
+
+        One frame of A/D moves the steering value by rise x dt (~0.065 at 60 Hz). At
+        motorway speed the steering needed to hold a lane is often SMALLER than that
+        step, so "pick the closest value" would never press anything and the car would
+        drift - a dead band. Instead the small corrections are dithered (sigma-delta):
+        we track how far the held value has been above/below the wanted value over time
+        and pick the key that keeps that running sum nearest zero. The car integrates
+        the steering, so on average it gets exactly the value we wanted."""
         target = max(-1.0, min(1.0, target))
-        best_k, best_e = 0, abs(self.predict(0, dt) - target)
-        for k in (1, -1):
-            e = abs(self.predict(k, dt) - target)
-            if e < best_e - 1e-9:
-                best_k, best_e = k, e
+        self._target = target
+        cands = (0, 1, -1)
+        if not self.dither or abs(target - self.s) > 0.25:
+            best_k, best_e = 0, abs(self.predict(0, dt) - target)
+            for k in (1, -1):
+                e = abs(self.predict(k, dt) - target)
+                if e < best_e - 1e-9:
+                    best_k, best_e = k, e
+            return best_k
+        best_k, best_c = 0, None
+        step = self.rise * dt * dt
+        for k in cands:
+            sn = self.predict(k, dt)
+            acc = self.acc + (sn - target) * dt
+            # main goal: running sum near zero; small tie-break toward the value itself
+            c = abs(acc) + 0.05 * abs(sn - target) * dt
+            # calm hands: prefer letting go over pressing, and never press the key AGAINST the
+            # wanted direction when letting go (spring-back) would do
+            if k != 0:
+                c += 0.15 * step
+                if target * k < 0 and abs(target) > 0.003:
+                    c += 0.6 * step
+            if best_c is None or c < best_c - 1e-12:
+                best_k, best_c = k, c
         return best_k
 
     def apply(self, key: int, dt: float) -> None:
         self.s = self.predict(key, dt)
+        if self.dither:
+            self.acc = max(-0.03, min(0.03, self.acc + (self.s - self._target) * dt))
 
 
 def max_steer_rad(speed_ms: float, lock_deg: float, falloff_ms: float) -> float:

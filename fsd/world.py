@@ -84,6 +84,9 @@ class World:
     vanish_x: float | None = None   # lane vanishing point x (screen px)
     clear_ahead_m: float = 0.0      # our lane is SEEN to be clear up to here (0 = unknown / hidden)
     extra_hidden_m: float = 0.0     # the first metres of our lane hidden behind our own car on screen
+    lanes_t: float = 0.0            # when the lane detection used here was taken (perception time)
+    lane_switch: int = 0            # +1/-1: this frame our lane became the one to the right/left
+    road_edges: object = None       # perception.road_model.RoadEdges: where the road surface ends
     timings: dict = field(default_factory=dict)
 
 
@@ -114,3 +117,4 @@ class Plan:
     turn_pending: str | None = None  # "left" | "right"
     turn_preview: list[tuple[float, float]] = field(default_factory=list)
     alert: str = ""
+    lane_change: bool = False        # a lane change is in progress (whatever the mode shows)

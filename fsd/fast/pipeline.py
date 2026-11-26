@@ -34,6 +34,7 @@ from ..settings import Settings
 from ..world import Obj, World
 from .autocal import AutoCalibrator
 from .lamps import find_lamps
+from ..perception.road_model import RoadModel
 from .obstacles import ObstacleFinder
 from .screen_lanes import ScreenLaneFinder, ScreenLaneResult
 
@@ -116,6 +117,8 @@ class FastPerception:
         self.tracker = Tracker()
         self.emerg = EmergencyDetector()
         self.obstacles = ObstacleFinder()
+        self.road_model = RoadModel()
+        self.yaw_hint: float | None = None          # set by the driving core (not used for shifting here)
         self.ego_shape = EgoShape()
         self.ego_box: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.autocal = AutoCalibrator(self.cal)
@@ -272,6 +275,9 @@ class FastPerception:
         res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
         self.last_screen = res
         w.lanes = res.lanes
+        w.lanes_t = t
+        w.road_edges = self._edges(frame, res, ego_mask)
+        tm["road"] = time.perf_counter() - t0
         w.stop_line_dist = res.stop_line if res.stop_line is not None else 999.0
         w.crosswalk_dist = res.crosswalk if res.crosswalk is not None else 999.0
         tm["lanes"] = time.perf_counter() - t0
@@ -416,18 +422,32 @@ class FastPerception:
                 setattr(self.cal, k, v)
             self._rebuild_geometry(W, H)
         free = self.obstacles.find(frame, res.lanes, self.screen, res.masks.wide, ego_mask, p["lane_width_m"])
+        edges = self._edges(frame, res, ego_mask)
         paint = None
         if res.masks is not None:
             paint = np.packbits((res.masks.paint | res.masks.wide) > 0, axis=None)
         return {
             "t": t, "lanes": res.lanes, "stop": res.stop_line, "cross": res.crosswalk,
             "chains": [(np.asarray(pts, np.int16), ego, yel) for pts, ego, yel in res.chains_screen],
-            "paint": paint, "shape": (H, W), "obstacles": free,
+            "paint": paint, "shape": (H, W), "obstacles": free, "edges": edges,
             "clear_to": self.obstacles.clear_to, "hidden_to": self.obstacles.hidden_to,
             "vp_x": self.screen.vp_x, "ego_pair": res.ego_pair_screen,
             "cal": dict(cal_fields) if cal_fields else None, "cal_msg": self.autocal.message if cal_fields else "",
             "timings": {**{k: v for k, v in res.timings.items()}, "lanes_total": time.perf_counter() - t_start},
         }
+
+    def _edges(self, frame, res, ego_mask):
+        """Road surface edges (works without lane lines)."""
+        try:
+            paint = None
+            if res.masks is not None:
+                paint = (res.masks.paint > 0) | (res.masks.wide > 0)
+            heading_y = res.lanes.center[2] if res.lanes.conf > 0.4 else 0.0
+            if abs(heading_y) > 2.5:
+                heading_y = 0.0
+            return self.road_model.update(frame, self.screen, paint, ego_mask, heading_y)
+        except Exception:  # noqa: BLE001 - never let the road model break the lanes
+            return None
 
     def objects_job(self, frame: np.ndarray, fine: np.ndarray | None, t: float, do_ego: bool) -> dict:
         """Lamps, stop signs and (now and then) the exact outline of our car. Worker process."""

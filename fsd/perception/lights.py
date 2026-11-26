@@ -139,6 +139,16 @@ class SignalTracker:
         lateral = ((x1 + x2) / 2 - self.geo.W / 2) / self.geo.focal_px * d_cam
         return d_cam - self.cam_to_bumper, lateral
 
+    def lamp_height(self, box, dist: float, lat: float) -> float:
+        """Height (m) of the bottom of `box` above the road at distance `dist`."""
+        try:
+            g = self.geo.vehicle_to_screen(np.array([[dist, lat]], np.float32))
+        except Exception:  # noqa: BLE001
+            return 99.0
+        y_ground = float(g[0][1])
+        d_cam = dist + self.cam_to_bumper
+        return (y_ground - box[3]) * d_cam / max(1.0, self.geo.focal_px)
+
     def update(self, frame: np.ndarray, lights: list[Obj], lane_center_y: float,
                flash_window: float = 2.0, t: float | None = None) -> SignalInfo:
         t = time.perf_counter() if t is None else t
@@ -161,6 +171,12 @@ class SignalTracker:
                 continue
             # must be roughly over our road: within ~7 m sideways of our lane centre
             if abs(lat - lane_center_y) > 7.0 + dist * 0.05:
+                continue
+            # must HANG above the road: a lamp whose bottom is less than ~2 m above the ground is a
+            # car's tail / brake light (they're ~1 m up), not a signal. Using the housing size for
+            # the distance over-estimates it for a small tail light, which only pushes its height
+            # lower - real signals (4-6 m up) pass whatever the camera height.
+            if self.lamp_height(ob.box, dist, lat) < 2.0:
                 continue
             relevant.append((dist, state, conf, ob))
 

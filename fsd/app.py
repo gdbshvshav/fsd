@@ -26,6 +26,8 @@ import numpy as np
 from .capture import Capture, FileSource
 from .control.camera_aim import CameraAim
 from .control.controllers import LateralController, SpeedController
+from .drive.driver import Driver
+from .params import ROOT as _ROOT
 from .learning.learner import Learner
 from .learning.recorder import Recorder, TrainingRecorder
 from .notify import BLUE, GREY, ORANGE, discord
@@ -86,6 +88,7 @@ class App:
         self.planner = Planner()
         self.lat = LateralController()
         self.lon = SpeedController()
+        self.driver = Driver()
         self.actuator = Actuator()
         self.camera = CameraAim()
         self.recorder = Recorder()
@@ -135,6 +138,7 @@ class App:
         self.planner.reset()
         self.lat.reset()
         self.lon.reset()
+        self.driver.reset()
         self.engaged = True
         self.actuator.set_enabled(not self.dry_run)
         self.learner.say("FSD engaged" + (" (dry run: no keys pressed)" if self.dry_run else ""))
@@ -155,7 +159,15 @@ class App:
                         else "", ORANGE if why != "F1" else GREY, [
             ("Speed", f"{speed:.0f} kph", True),
             ("Was doing", f"{plan.mode.value}: {plan.reason}" if plan else "-", True)])
+        q = self.driver.tel.quality()
+        if q:
+            self.learner.say(f"Last 20 s: lane error avg {q['lat_err_mean']:.2f} m, max {q['lat_err_max']:.2f} m, "
+                             f"steering reversals {q['steer_reversals_per_s']:.1f}/s")
         if why == "takeover" or speed > 5:
+            try:
+                self.driver.tel.dump_csv(_ROOT / "data" / "logs")
+            except OSError:
+                pass
             self.recorder.trigger(time.perf_counter(), why, {"params_version": self.store.version,
                                                               "vehicle": self.store.vehicle})
 
@@ -367,6 +379,11 @@ class App:
             p = self.store.snapshot()
 
             w = self.perception.process(frame, p, t=now, fine=pair.fine)
+            new_core = p.get("drive_core", 1.0) > 0.5
+            if new_core:
+                # filtered speed / yaw / lanes (see fsd/drive); the vision uses our yaw next frame
+                self.driver.sense(w, p, now, self.actuator.steer_obs.s, lanes_key=w.lanes_t or None)
+                self.perception.yaw_hint = w.yaw_rate
             self.actuator.speed_kph = w.speed_kph
 
             # pause (don't steer) if Roblox lost focus, so keys never go to another app
@@ -390,13 +407,17 @@ class App:
                 plan.alert = f"Slow: only {self.fps:.0f} checks/s - capped at 30 km/h"
             steer = pedal = 0.0
             if active:
-                self.lat.observe(now, w.speed_kph, self.actuator.steer_obs.s, w.yaw_rate, p, w.lanes.conf > 0.4)
-                steer = self.lat.step(w, plan, p, dt)
-                pedal = self.lon.step(w, plan, p, dt)
+                if new_core:
+                    steer, pedal = self.driver.act(w, plan, p, dt, now)
+                else:
+                    self.lat.observe(now, w.speed_kph, self.actuator.steer_obs.s, w.yaw_rate, p, w.lanes.conf > 0.4)
+                    steer = self.lat.step(w, plan, p, dt)
+                    pedal = self.lon.step(w, plan, p, dt)
                 self.actuator.set_steer_model(p["steer_rise_per_s"], p["steer_return_per_s"])
                 self.actuator.command(steer, pedal)
                 if plan.mode == Mode.FAULT and w.speed_kph < 2:
                     self.disengage("lost road")
+            plan.steer, plan.pedal = steer, pedal
             if self.paused_reason:
                 plan.alert = self.paused_reason
 
@@ -441,8 +462,12 @@ class App:
                 st["warn"] = "keys released: commands too slow"
             for m in self.perception.messages:
                 self.learner.say(m)
+            for m in self.driver.sup.pop_messages():
+                self.learner.say(m)
+            self.driver.loop_fps = self.fps or None
             self.perception.messages.clear()
             st.update({"fps": self.fps, "params": self.store.version, "log": list(self.learner.log)})
+            st.update(self.driver.status())
             if self.learner.busy:
                 st["log"] = st["log"] + [self.learner.busy]
             with self._lock:

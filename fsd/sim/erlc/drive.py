@@ -168,6 +168,8 @@ class ErlcDrive:
         self.planner = Planner()
         self.lat = LateralController()
         self.lon = SpeedController()
+        from ...drive.driver import Driver
+        self.driver = Driver()
         self.keys = KeyModulator(self.p["steer_rise_per_s"], self.p["steer_return_per_s"])
         self.keys.dt = self.dt / self.sub
         self.video = None
@@ -226,12 +228,18 @@ class ErlcDrive:
         w.speed_kph = self.car.speed_kph
         w.speed_valid = True
         w.speed_limit_kph = self.route.limit_kph
+        new_core = self.p.get("drive_core", 1.0) > 0.5
+        if new_core:
+            self.driver.sense(w, self.p, self.t, self.keys.obs.s, lanes_key=w.lanes_t)
         self.planner.frame = pair.work
         plan = self.planner.step(w, self.p, True, now=self.t)
         self.blinker_taps += self.planner.auto.blinker.pop_taps()
-        self.lat.observe(self.t, self.car.speed_kph, self.keys.obs.s, w.yaw_rate, self.p, w.lanes.conf > 0.4)
-        steer = self.lat.step(w, plan, self.p, self.dt)
-        pedal = self.lon.step(w, plan, self.p, self.dt)
+        if new_core:
+            steer, pedal = self.driver.act(w, plan, self.p, self.dt, self.t)
+        else:
+            self.lat.observe(self.t, self.car.speed_kph, self.keys.obs.s, w.yaw_rate, self.p, w.lanes.conf > 0.4)
+            steer = self.lat.step(w, plan, self.p, self.dt)
+            pedal = self.lon.step(w, plan, self.p, self.dt)
         for _ in range(self.sub):
             W_, A_, S_, D_ = self.keys.keys(steer, pedal, self.car.speed_kph)
             self.car.step(self.dt / self.sub, W_, A_, S_, D_)

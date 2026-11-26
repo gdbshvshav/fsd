@@ -119,6 +119,14 @@ class Dashboard:
         self.view = "camera"          # "camera" = your game, greyed, with what FSD sees highlighted; "3d" = map view
         self._rect_t = 0.0
         self._resize_at = 0.0
+        from .hud import Hud
+        from .minimap import MiniMap
+        self.hud = Hud(self)
+        self.minimap = MiniMap()
+        self.show_minimap = True
+        self._dt = 1 / 60
+        # smoother UI when the PC has cores to spare (the vision runs in other processes)
+        self.ui_fps = 60 if (os.cpu_count() or 2) >= 6 else 30
 
     # ---------------- window management (Windows) ----------------
     _u32 = None
@@ -243,7 +251,7 @@ class Dashboard:
                 log_error("dashboard draw")
                 self.screen.fill(BG)
             pygame.display.flip()
-            dt = self.clock.tick(30) / 1000.0
+            dt = self.clock.tick(self.ui_fps) / 1000.0
         self.app.shutdown()
         pygame.quit()
 
@@ -262,6 +270,8 @@ class Dashboard:
             return True
         if ev.key == pygame.K_c:
             self.show_camera = not self.show_camera
+        if ev.key == pygame.K_m:
+            self.show_minimap = not self.show_minimap
         if ev.key == pygame.K_v:
             self.view = "3d" if self.view == "camera" else "camera"
             self.app.want_debug_img = self.view == "3d"
@@ -273,6 +283,7 @@ class Dashboard:
     def draw(self, dt: float) -> None:
         snap = self.app.snapshot()
         w, plan = snap.world, snap.plan
+        self._dt = dt
         self.blink_t = getattr(self, "blink_t", 0.0) + dt
         if time.time() - self._rect_t > 1.0 and self.hwnd:
             self._rect_t = time.time()
@@ -411,54 +422,18 @@ class Dashboard:
         self._draw_hud(snap, w, plan)
 
     def _draw_hud(self, snap, w, plan) -> None:
-        """Speed, FSD state, light, turn signal: a slim bar across the top."""
+        """Animated HUD (ui/hud.py) + mini map + the footer line."""
         Wv, Hv = self.W, self.H
-        bar_h = max(48, int(Hv * 0.13))
-        bar = pygame.Surface((Wv, bar_h), pygame.SRCALPHA)
-        bar.fill((10, 11, 14, 200))
-        self.screen.blit(bar, (0, 0))
-        engaged = snap.engaged
-        mode = plan.mode if plan else Mode.OFF
-        unit = w.speed_unit if w else "kph"
-        spd = float(self.e_speed.to(w.speed_kph if w else 0, 1 / 60)) if w else 0.0
-        shown = spd / 1.609344 if unit == "mph" else spd
-        x = 12
-        r = self._text(self.f_big, f"{shown:.0f}", WHITE if (w and w.speed_valid) else DIM, (x, bar_h // 2), "midleft")
-        self._text(self.f_small, unit.upper() if (w and w.speed_valid) else "speed ?", DIM, (r.right + 6, bar_h // 2),
-                   "midleft")
-        x = r.right + 70
-        if w is not None and w.speed_limit_kph:
-            lim = w.speed_limit_kph / 1.609344 if unit == "mph" else w.speed_limit_kph
-            sign = pygame.Rect(x, (bar_h - int(bar_h * 0.8)) // 2, int(bar_h * 0.62), int(bar_h * 0.8))
-            pygame.draw.rect(self.screen, WHITE, sign, border_radius=4)
-            self._text(self.f_small, f"{lim:.0f}", (20, 20, 20), sign.center, "center")
-            x = sign.right + 12
-        pill = pygame.Rect(x, bar_h // 2 - 15, max(150, int(Wv * 0.3)), 30)
-        pcol = BLUE if engaged else (60, 64, 74)
-        if mode == Mode.FAULT:
-            pcol = RED if self.blink < 0.5 else (120, 30, 30)
-        pygame.draw.rect(self.screen, pcol, pill, border_radius=15)
-        label = MODE_TEXT.get(mode, mode.value)
-        if engaged and plan is not None and plan.reason:
-            label = f"{label} · {plan.reason}"
-        self._text(self.f_small, label[:44], WHITE, pill.center, "center")
-        x = pill.right + 14
-        if plan is not None:
-            on = self.blink < 0.5
-            s = 9
-            lc = GREEN if (plan.turn_pending == "left" and on) else (60, 64, 74)
-            rc = GREEN if (plan.turn_pending == "right" and on) else (60, 64, 74)
-            cy = bar_h // 2
-            pygame.draw.polygon(self.screen, lc, [(x, cy), (x + s, cy - s), (x + s, cy + s)])
-            pygame.draw.polygon(self.screen, rc, [(x + 3 * s + 6, cy), (x + 2 * s + 6, cy - s), (x + 2 * s + 6, cy + s)])
-            x += 3 * s + 20
-        if w is not None and w.signal.state != Light.NONE and x < Wv - 30:
-            col = {Light.RED: RED, Light.YELLOW: YELLOW, Light.GREEN: GREEN, Light.FLASHING_RED: RED}.get(
-                w.signal.state, DIM)
-            if not (w.signal.state == Light.FLASHING_RED and self.blink > 0.5):
-                pygame.draw.circle(self.screen, col, (x + 10, bar_h // 2), 10)
-            self._text(self.f_small, f"{w.signal.distance:.0f} m", WHITE, (x + 26, bar_h // 2), "midleft")
-        # bottom line: newest message + keys
+        self.hud.draw(self.screen, snap, w, plan, self._dt)
+        if self.show_minimap:
+            mw = max(170, int(Wv * 0.24))
+            mh = int(mw * 0.85)
+            rect = pygame.Rect(Wv - mw - 10, Hv - mh - self.line_h * 2 - 16, mw, mh)
+            self.minimap.draw(self.screen, rect, w, plan, self._dt)
+        self._draw_footer(snap, plan)
+
+    def _draw_footer(self, snap, plan) -> None:
+        Wv, Hv = self.W, self.H
         st = snap.status
         log = list(st.get("log", []))
         msg = (plan.alert if plan is not None and plan.alert else (log[-1][9:] if log else ""))
@@ -466,15 +441,18 @@ class Dashboard:
         foot.fill((10, 11, 14, 170))
         self.screen.blit(foot, (0, Hv - foot.get_height()))
         self._text(self.f_small, msg[:90], WHITE, (10, Hv - 2 * self.line_h - 4))
-        extra = f" · YOLO {st.get('det_fps', 0):.0f}/s" if st.get("device", "").startswith("GPU") else ""
         lanes = f" · lanes {st['lanes_fps']:.0f}/s" if "lanes_fps" in st else f" ({st.get('vision_ms', 0):.0f} ms)"
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view   {st.get('fps', 0):.0f} fps{lanes}"
-                f" · lights {st.get('lights_fps', 0):.0f}/s{extra} · v{st.get('params', 0)}")
+        q = ""
+        if st.get("drive_weave"):
+            q = " · softening steering (weave)"
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map   {st.get('fps', 0):.0f} fps{lanes}"
+                f" · lights {st.get('lights_fps', 0):.0f}/s · v{st.get('params', 0)}{q}")
         if st.get("warn"):
             keys = st["warn"] + " · " + keys
-        self._text(self.f_small, keys[:110], (140, 144, 154), (10, Hv - self.line_h - 2))
+        self._text(self.f_small, keys[:120], (140, 144, 154), (10, Hv - self.line_h - 2))
         if snap.training_on:
-            self._text(self.f_small, f"● REC {snap.training_count}", RED, (Wv - 10, bar_h + 6), "topright")
+            self._text(self.f_small, f"● REC {snap.training_count}", RED, (Wv - 10, Hv - 2 * self.line_h - 4),
+                       "topright")
 
     def _poly_pts(self, coeffs, x0=-8.0, x1=80.0, n=44, dy=0.0):
         a, b, c = coeffs

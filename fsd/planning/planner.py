@@ -20,6 +20,8 @@ from .junction_memory import JunctionMemory
 from .autonomy import Autonomy
 from .lead_memory import LeadMemory
 from .turns import TurnManager
+from ..drive.path_planner import OffsetShaper, edges_path, heading_hold_path
+from ..drive.side_keeper import SideKeeper
 
 KPH = 3.6
 
@@ -36,6 +38,9 @@ class Planner:
         self.last_t = time.perf_counter()
         self.prev_offset: float | None = None
         self.lc_corr = 0.0
+        self.shaper = OffsetShaper()
+        self._lc_was = False
+        self._lc_switched = False
         self.last_limit_kph: float | None = None
         self.red_committed = False        # we decided to run a yellow
         self.last_stop_reason = ""
@@ -43,6 +48,8 @@ class Planner:
         self.sight_hist: list[float] = []
         self.lead_mem = LeadMemory()
         self.auto = Autonomy()
+        self.side = SideKeeper()
+        self.side_decision = None
         self.frame = None            # latest work picture (set by the app / sim) for road-end checks
 
     def reset(self) -> None:
@@ -90,14 +97,22 @@ class Planner:
     # ------------------------------------------------------------------
     def build_path(self, w: World, p, extra_shift: float) -> list[tuple[float, float]]:
         ln = w.lanes
+        sd = self.side_decision
+        edges = w.road_edges
+        if ln.conf < p["lane_min_conf"] and sd is not None and sd.no_lines_offset is not None \
+                and edges is not None and getattr(edges, "ok", False) and not self.turns.s.lane_change:
+            return edges_path(edges, sd.no_lines_offset + (float(extra_shift(np.array([0.0]))[0])
+                                                          if callable(extra_shift) else extra_shift))
         if ln.conf <= 0:
-            return [(float(x), 0.0) for x in np.linspace(0, 30, 16)]
+            return heading_hold_path(w.yaw_rate, w.speed_kph / KPH)
         a, b, c = ln.center
         # the chase camera swings after the car: while turning it points behind the car's
         # heading, so everything looks rotated toward the inside of the bend. Undo that.
-        b = b - w.yaw_rate * p.get("cam_yaw_lag_s", 0.0)
+        if p.get("drive_core", 1.0) <= 0.5:          # (the new core corrects the lanes itself)
+            b = b - w.yaw_rate * p.get("cam_yaw_lag_s", 0.0)
         xs = np.linspace(0, max(15.0, min(60.0, ln.x_max)), 24)
-        ys = a * xs * xs + b * xs + c + p["lane_center_bias_m"] + extra_shift
+        off = extra_shift(xs) if callable(extra_shift) else extra_shift
+        ys = a * xs * xs + b * xs + c + p["lane_center_bias_m"] + off
         return [(float(x), float(y)) for x, y in zip(xs, ys)]
 
     def stop_point(self, w: World, p, for_light: bool) -> float:
@@ -150,24 +165,56 @@ class Planner:
         self.auto.step(w, self.turns, p, now, self.frame)
         self.turns.update(w, p, dt, now, self.adjacent_free(w, lane_w))
         ts = self.turns.s
+        # right-hand traffic: wrong side / keep right / roads without lines
+        sd = self.side.update(w.lanes, w.road_edges, w.objects, p, now, v, ts.lane_change or ts.active)
+        self.side_decision = sd
+        if sd.move_right and ts.pending is None:
+            why = "back to our side" if sd.wrong_side else "keeping right"
+            msg = self.turns.force_lane_change("right", now, self.adjacent_free(w, lane_w).get("right", False), why)
+            if msg:
+                plan.alert = msg
+        ts = self.turns.s
 
-        # lane-change bookkeeping: when the ego lane re-assigns mid-change, keep the target fixed
-        if ts.lane_change and self.prev_offset is not None:
-            jump = w.lanes.offset - self.prev_offset
+        # lateral offset from the lane centre: lane changes and keep-right moves are shaped
+        # along the road (quintic over a speed-dependent distance), and when the lane under us
+        # re-assigns (we crossed the line) the whole offset moves with it - no double jump.
+        switch = getattr(w, "lane_switch", 0)
+        if switch == 0 and self.prev_offset is not None and ts.lane_change:
+            jump = w.lanes.offset - self.prev_offset           # old core: detect it from the jump
             if abs(jump - ts.lc_dir * lane_w) < 1.2:
-                self.lc_corr -= ts.lc_dir * lane_w
-        if not ts.lane_change:
-            self.lc_corr = 0.0
+                switch = ts.lc_dir
         self.prev_offset = w.lanes.offset
-
-        shift = self.turns.lateral_shift(lane_w) + self.lc_corr
+        if switch:
+            self.shaper.shift(-switch * lane_w)
+            self._lc_switched = True
+            if ts.lane_change and w.lanes.conf > 0.3:
+                # glide from where the car actually is in the new lane
+                self.shaper.restart_from(float(np.clip(-w.lanes.offset, -lane_w, lane_w)))
+        if ts.lane_change and not self._lc_was:
+            self._lc_switched = False
+            self.shaper.set_target(self.shaper.target + ts.lc_dir * lane_w, v,
+                                   sec=p["lane_change_s"])
+        self._lc_was = ts.lane_change
+        want = 0.0 if not ts.lane_change else self.shaper.target
         if w.emergency_near and not ts.active:
-            shift += 0.9                                      # keep right for emergency vehicles
+            want += 0.9                                       # keep right for emergency vehicles
+        if not ts.lane_change:
+            self.shaper.set_target(want, v, min_len=10.0, sec=1.5)
+        self.shaper.advance(v * dt)
+        if ts.lane_change and self._lc_switched and abs(self.shaper.now - self.shaper.target) < 0.15 \
+                and self.shaper.done_m >= self.shaper.length - 0.5:
+            self.turns.finish_lane_change()
+            ts = self.turns.s
+            self.shaper.snap_to(self.shaper.now)
+        shift = self.shaper.profile if not ts.active else 0.0
         path = self.turns.path_override(p, w) or self.build_path(w, p, shift)
         plan.path = path
         plan.turn_pending = ts.pending
         plan.turn_preview = ts.preview
-        plan.alert = ts.message
+        plan.lane_change = ts.lane_change
+        plan.alert = ts.message or plan.alert
+        if sd.wrong_side:
+            plan.alert = "Wrong side of the road - moving right"
 
         target = cruise
         mode = Mode.CRUISE
@@ -198,10 +245,14 @@ class Planner:
             mode, reason = Mode.LANE_CHANGE, f"lane change {ts.pending}"
 
         # ---------- lane confidence ----------
-        if w.lanes.conf < p["lane_min_conf"] and not ts.active:
+        if w.lanes.conf < p["lane_min_conf"] and not ts.active and not ts.lane_change:
             if self.no_lane_since is None:
                 self.no_lane_since = now
-            if w.lanes.conf <= 0.01 and now - self.no_lane_since > 2.0:
+            edges_ok = w.road_edges is not None and getattr(w.road_edges, "ok", False) and sd.no_lines_offset is not None
+            if edges_ok:
+                target = min(target, 40.0)
+                mode, reason = Mode.CAUTION, sd.reason or "no lane lines - following the road edges"
+            elif w.lanes.conf <= 0.01 and now - self.no_lane_since > 2.0:
                 mode, reason = Mode.FAULT, "can't see the road - take over"
                 plan.alert = "TAKE OVER: road not visible"
                 stop_at = 0.0
@@ -278,6 +329,11 @@ class Planner:
             v_follow = v_lead + 0.5 * (gap - desired)
             if gap < p["follow_min_gap_m"] + 1:
                 stop_at = 0.0 if stop_at is None else min(stop_at, 0.0)
+            elif v_lead < 2.0 and v > v_lead + 1.0:
+                # stopped (or nearly) car ahead: a real stop point, so the speed planner brakes as
+                # hard as it must - up to everything - to stop behind it
+                sp = max(0.0, gap - p["follow_min_gap_m"])
+                stop_at = sp if stop_at is None else min(stop_at, sp)
             if v_follow * KPH < target:
                 target = max(0.0, v_follow * KPH)
                 if mode in (Mode.CRUISE, Mode.CAUTION):

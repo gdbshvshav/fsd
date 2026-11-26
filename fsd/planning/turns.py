@@ -66,6 +66,28 @@ class TurnManager:
         st.message = f"{direction.title()} turn queued"
         return st.message
 
+    def force_lane_change(self, direction: str, now: float, free: bool, why: str = "back to our side") -> str:
+        """Move one lane over now (whatever the line type) - used to get back to the right
+        side of the road. Waits (returns a message) while the target lane isn't free."""
+        st = self.s
+        if st.active or st.lane_change:
+            return ""
+        if not free:
+            st.message = f"Waiting for a gap to the {direction}"
+            return st.message
+        st.pending = direction
+        st.since = now
+        st.lane_change = True
+        st.lc_progress = 0.0
+        st.lc_dir = -1 if direction == "left" else 1
+        st.message = f"Moving {direction} - {why}"
+        return st.message
+
+    def finish_lane_change(self) -> None:
+        if self.s.lane_change:
+            self.cancel()
+            self.s.message = "Lane change complete"
+
     def cancel(self) -> None:
         self.s = TurnState()
 
@@ -94,10 +116,12 @@ class TurnManager:
             return
 
         if st.lane_change:
+            # the planner finishes the change when the car is actually in the new lane
+            # (finish_lane_change); this is only a safety net if that never happens
             st.lc_progress += dt / p["lane_change_s"]
-            if st.lc_progress >= 1.0:
+            if st.lc_progress >= 3.0:
                 self.cancel()
-                self.s.message = "Lane change complete"
+                self.s.message = "Lane change ended"
             return
 
         # nearest junction cue

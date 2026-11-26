@@ -129,6 +129,14 @@ def shift_poly(coeffs, d: float, theta: float):
     return (a, 2 * a * d + b - theta, a * d * d + b * d + c)
 
 
+def advance_edges(e, d: float, theta: float):
+    """Road edges moved forward like the lanes."""
+    if e is None or not e.ok:
+        return e
+    return replace(e, left=shift_poly(e.left, d, theta), right=shift_poly(e.right, d, theta),
+                   x_max=max(0.0, e.x_max - d))
+
+
 def advance_lanes(L: Lanes, d: float, theta: float) -> Lanes:
     if L is None or (abs(d) < 1e-3 and abs(theta) < 1e-4):
         return L
@@ -217,6 +225,7 @@ class ParallelPerception:
         self.ms = 0.0
         self.lane_ms = 0.0
         self.lag_ms = 0.0
+        self.yaw_hint: float | None = None
         self.frame_id = 0
         self.ring: FrameRing | None = None
         self.procs: list[mp.Process] = []
@@ -408,6 +417,8 @@ class ParallelPerception:
             if self.ocr.limit_kph is not None:
                 w.speed_limit_kph = self.ocr.limit_kph
         w.yaw_rate = self.motion.update(frame, geo.horizon_y, t)
+        # the driving core's fused yaw (chassis model) is far more reliable than the picture's
+        yaw_shift = self.yaw_hint if self.yaw_hint is not None else w.yaw_rate
 
         # ---- lanes etc. from the newest worker result, moved forward to now ----
         lr = self.lane_res
@@ -416,7 +427,10 @@ class ParallelPerception:
             age = max(0.0, t - lr["t"])
             self.lag_ms = 0.8 * self.lag_ms + 0.2 * age * 1000
             v = w.speed_kph / 3.6
-            d, theta = v * age, w.yaw_rate * age
+            d, theta = v * age, yaw_shift * age
+            w.lanes_t = lr["t"]
+            if lr.get("edges") is not None:
+                w.road_edges = advance_edges(lr["edges"], d, theta)
             w.lanes = advance_lanes(lr["lanes"], d, theta) if age < 0.5 else lr["lanes"]
             if age > 0.5:
                 w.lanes = replace(w.lanes, conf=w.lanes.conf * 0.5)

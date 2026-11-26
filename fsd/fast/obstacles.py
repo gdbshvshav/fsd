@@ -92,34 +92,49 @@ class ObstacleFinder:
             d = float(rows.row_dist[y])
             if d < 0.8:
                 continue
-            if d > 60 or d > max(12.0, lanes.x_max + 4.0):
-                break                    # past where we actually see our lane: don't guess
+            if d > 60 or d > max(50.0, lanes.x_max + 20.0):
+                # past where we see our lane well: the lane is extrapolated a little further so a
+                # stopped car 30-50 m ahead (which itself HIDES the lines behind it) is found in time
+                break
             if d - last_d >= 0.5:
                 ys.append((y, d))
                 last_d = d
         if len(ys) < 5:
             return []
-        # learn the road colour from 2-9 m ahead in our lane (just past the car's roof on screen)
-        ys_arr = np.array([y for y, _ in ys])
-        ds = np.array([d for _, d in ys])
-        near = ys_arr[(ds >= 2.0) & (ds <= 9.0)]
-        if near.size:
-            ya, yb = int(near.min()), int(near.max()) + 1
-            dmid = float(ds[(ds >= 2.0) & (ds <= 9.0)].mean())
-            cy = a * dmid * dmid + b * dmid + c
-            r = int((ya + yb) // 2)
-            u0 = int(rows.row_c0[r] + (cy - hw * 0.7) * rows.row_ppm[r])
-            u1 = int(rows.row_c0[r] + (cy + hw * 0.7) * rows.row_ppm[r])
+        # learn the road colour just past our own car on screen: the nearest rows (from 2 m) where
+        # the car doesn't hide our lane. With a high or far chase camera the car covers the first
+        # ~10 m, so a fixed 2-9 m window would see only our own paintwork (and never learn).
+        pick = []
+        for y, d in ys:
+            if d < 2.0 or d > 25.0:
+                continue
+            cy = a * d * d + b * d + c
+            u0 = int(rows.row_c0[y] + (cy - hw * 0.7) * rows.row_ppm[y])
+            u1 = int(rows.row_c0[y] + (cy + hw * 0.7) * rows.row_ppm[y])
             u0, u1 = max(0, u0), min(W, u1)
-            if u1 - u0 > 4:
-                patch = frame[ya:yb, u0:u1]
-                pm = paint_wide[ya:yb, u0:u1] == 0
+            if u1 - u0 <= 4:
+                continue
+            if ego_mask is not None and float((ego_mask[y, u0:u1] == 0).mean()) < 0.6:
+                continue
+            pick.append((y, u0, u1))
+            if len(pick) >= 6 or d - (ys[0][1] if not pick else 0) > 40:
+                break
+        if pick:
+            labs, shs = [], []
+            for y, u0, u1 in pick:
+                seg = frame[y:y + 1, u0:u1]
+                pm = paint_wide[y, u0:u1] == 0
                 if ego_mask is not None:
-                    pm &= ego_mask[ya:yb, u0:u1] == 0
-                hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-                shadow = (hsv[:, :, 0] >= 95) & (hsv[:, :, 0] <= 130) & (hsv[:, :, 2] < 125)
-                lab = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB)
-                self.road.update(lab[pm], shadow[pm])
+                    pm &= ego_mask[y, u0:u1] == 0
+                hsv = cv2.cvtColor(seg, cv2.COLOR_BGR2HSV)[0]
+                lab = cv2.cvtColor(seg, cv2.COLOR_BGR2LAB)[0]
+                shadow = (hsv[:, 0] >= 95) & (hsv[:, 0] <= 130) & (hsv[:, 2] < 125)
+                labs.append(lab[pm])
+                shs.append(shadow[pm])
+            L = np.concatenate(labs) if labs else np.zeros((0, 3))
+            S = np.concatenate(shs) if shs else np.zeros(0, bool)
+            if len(L) >= 20:
+                self.road.update(L, S)
         if self.road.sun is None and self.road.shade is None:
             return []
         # walk up the lane. All sampled rows are colour-converted in ONE call (they're stacked

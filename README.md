@@ -47,6 +47,8 @@ A camera-based "Full Self-Driving" system for **Emergency Response: Liberty Coun
 | **F6** | Undo the last learned fix |
 | **F7** | Open the "What went wrong?" box |
 | **C** (on the dashboard) | Show / hide the camera debug view |
+| **M** (on the dashboard) | Show / hide the mini map (bottom right) |
+| **V** (on the dashboard) | Switch camera view / 3D road view |
 
 FSD pauses by itself if Roblox isn't the active window, so it never types into another app. If it loses the road, it stops and asks you to take over.
 
@@ -126,11 +128,30 @@ python -m fsd.sim.erlc shot highway_east --out view.png
 
 ## How it drives (short version)
 
-- **Steering**: Roblox keyboard steering isn't an angle - holding A/D moves a hidden
-  steering value toward full lock and releasing springs it back. `control/steer_model.py`
-  tracks that value from the keys it pressed and chooses, 60 times a second, the key that
-  lands it on the wanted value. The wanted value comes from pure pursuit + the road's own
-  curve, divided by the full lock the car has at that speed.
+The driving core lives in `fsd/drive/` (param `drive_core` = 1; set it to 0 for the old one):
+
+- **Speed** is the speedometer reading *plus* what the pedals should be doing in between
+  readings, so it's never stale (a misread "70" for "20" is ignored unless it repeats).
+- **Yaw** (how fast we turn) comes from the steering we hold and the lanes; the picture
+  is only trusted when it agrees. (The old picture-only yaw had spikes that steered the
+  car off the road at 100 km/h.)
+- **Lanes** are Kalman-filtered at 60 Hz: smooth, predicted between detections, re-based
+  the moment we cross a line, coasted straight across junctions.
+- **Steering**: an LQR controller on the path (rebuilt for each speed) plus the bend's
+  curvature ahead, then converted to the Roblox steering value. Roblox keyboard steering
+  isn't an angle - holding A/D moves a hidden steering value at a fixed rate and
+  releasing springs it back. One frame of A/D is too coarse for motorway speed, so small
+  steering is **dithered** (sigma-delta): on average the car gets exactly the steering
+  wanted - no dead band, no drifting at 200 km/h.
+- **Speed planning** looks 200 m ahead: bends (from the path and the lane shape), stop
+  points and the limit; brakes early and smoothly (jerk-limited), never late.
+- **Which side**: ER:LC drives on the right. A yellow line on our right or a car coming at
+  us in our lane = wrong side -> signal and move right. No lane lines -> the road's edges
+  are found from the road colour and we keep to the right half (or the middle of a narrow
+  road). On fast multi-lane roads we return to the right lane after passing.
+- **Supervisor**: if the car drifts while steering against it, the steering sits at full
+  lock, lanes are unreliable, the speed can't be read or the PC is slow, it eases the
+  speed down and tells you why.
 - **Junctions**: stop bars are measured while visible and *remembered* (dead-reckoned
   from our speed) after they slide under our own car; a stop sign or flashing red seen
   for the junction means a full stop at the bar, kept until the stop is done
@@ -155,10 +176,12 @@ fsd/
   perception/         lanes, lights, signs, YOLO, OCR, tracking, calibration
   fast/               the 60 fps vision path: paint, lanes, lamps, obstacles, pipeline
   planning/           planner (rules), turns (Q/E, lane changes), junction + lead memory
-  control/            steering + speed controllers, Roblox steering model, camera aim
+  drive/              driving core: yaw/speed/lane filters, LQR steering, speed planner,
+                      pedal map, right-hand-traffic rules, supervisor, telemetry
+  control/            Roblox steering model (key dithering), old controllers, camera aim
   sim/                closed-loop driving simulator, scenarios, auto-tuner
   learning/           recorder, Gemini/Groq, replay tests, training
-  ui/                 dashboard (pygame), debug drawing
+  ui/                 dashboard (pygame), animated HUD, mini map, animation toolkit
 tests/                unit tests
 ```
 

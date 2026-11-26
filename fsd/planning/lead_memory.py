@@ -33,7 +33,7 @@ class Remembered:
 
 class LeadMemory:
     def __init__(self, keep_far_s: float = 0.6, keep_close_s: float = 4.0, close_m: float = 15.0,
-                 fade_s: float = 2.0, confirm_n: int = 5):
+                 fade_s: float = 2.0, confirm_n: int = 3):
         self.confirm_n = confirm_n      # frames an object must be tracked before it's remembered
         self.keep_far_s = keep_far_s
         self.keep_close_s = keep_close_s
@@ -86,11 +86,14 @@ class LeadMemory:
         keep = self.keep_close_s if L.x < self.close_m else self.keep_far_s
         if L.x < max(hidden_m, 6.0) and speed_ms < 1.0:
             keep = 1e9          # parked behind something we can't see any more: wait to SEE it gone
-        if corridor_visible_m > L.x + 3.0 and hidden_m < L.x - 1.0:
+        # "seen clear where it should be" only counts when that spot is in plain view (well past
+        # the part of the road our own car hides) and the clear road reaches well beyond it -
+        # a car right in front is half hidden and its roof reads as road
+        if corridor_visible_m > L.x + 8.0 and L.x > hidden_m + 4.0:
             self.clear_frames += 1
         else:
             self.clear_frames = 0
-        if unseen > keep or L.x < -2.0 or self.clear_frames >= 4:
+        if unseen > keep or L.x < -2.0 or self.clear_frames >= 8:
             self.lead = None
             return None
         return self._as_obj(L, speed_ms)

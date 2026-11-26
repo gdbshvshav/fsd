@@ -56,7 +56,7 @@ SPEC: dict[str, Spec] = {
     "auto_merge": Spec(1.0, 0.0, 1.0, "1 = merge by itself (with blinker) when our lane ends"),
     "auto_route": Spec(1.0, 0.0, 1.0, "1 = pick a turn by itself when the road ends (T-junction)"),
     "steer_adapt": Spec(1.0, 0.0, 1.0, "1 = learn this car's steering strength while driving"),
-    "cam_yaw_lag_s": Spec(0.2, 0.0, 0.8, "How far the game camera lags the car's turning (s)"),
+    "cam_yaw_lag_s": Spec(0.25, 0.0, 0.8, "How far the game camera lags the car's turning (s)"),
     "steer_damping": Spec(0.35, 0.0, 1.5, "Damps yaw rate to stop overshoot/swerving"),
     "steer_rate_limit": Spec(4.0, 1.0, 12.0, "Max change in steering duty per second"),
     "steer_speed_scale": Spec(0.0, 0.0, 0.06, "Extra gentleness per kph (0 = rely on the steering model)"),
@@ -88,6 +88,20 @@ SPEC: dict[str, Spec] = {
     "light_min_score": Spec(0.35, 0.1, 0.9, "Minimum detector score for traffic lights"),
     "object_min_score": Spec(0.35, 0.1, 0.9, "Minimum detector score for cars/people/cones"),
     "flash_window_s": Spec(2.0, 1.0, 4.0, "Window to decide a red light is flashing (outage)"),
+    # ---- driving core (fsd/drive) ----
+    "drive_core": Spec(1.0, 0.0, 1.0, "1 = new driving core (filtered lanes, LQR steering, look-ahead speed)"),
+    "steer_softness": Spec(1.0, 0.2, 5.0, "LQR steering: higher = gentler corrections, lower = firmer"),
+    "steer_strength_learn": Spec(0.0, 0.0, 1.0, "1 = also scale steering by a learned car strength (usually not needed)"),
+    "steer_look_s": Spec(0.35, 0.0, 1.0, "Steering aims at the error this many seconds ahead (3-12 m)"),
+    "cam_lag_learn": Spec(1.0, 0.0, 1.0, "1 = learn how much the game camera lags the car while driving"),
+    "steer_ki": Spec(0.35, 0.0, 2.0, "Steering integral: removes a constant off-centre in long bends"),
+    "control_latency_s": Spec(0.05, 0.0, 0.25, "Delay from screen to keys (s); the steering looks this far ahead"),
+    "max_lat_accel": Spec(7.0, 3.0, 12.0, "Most sideways acceleration steering may ask for (m/s^2)"),
+    "comfort_accel": Spec(3.0, 1.0, 6.0, "Normal acceleration (m/s^2)"),
+    "jerk_limit": Spec(4.0, 1.0, 15.0, "How fast acceleration may change (m/s^3) - lower = smoother"),
+    "speed_kp": Spec(0.7, 0.1, 2.0, "Extra acceleration per m/s of speed error"),
+    "speed_ki": Spec(0.08, 0.0, 0.5, "Speed error integral"),
+    "keep_right": Spec(1.0, 0.0, 1.0, "1 = on fast multi-lane roads, return to the right lane after passing"),
     # ---- camera ----
     "camera_target_horizon": Spec(0.40, 0.25, 0.55, "Where the horizon should sit (fraction of screen height)"),
     "camera_yaw_gain": Spec(0.25, 0.0, 1.0, "How fast the camera re-centres sideways"),
@@ -98,7 +112,7 @@ VEHICLE_SPEC_KEYS = {
     "wheelbase_m", "steer_lock_deg", "steer_falloff_ms", "steer_rise_per_s", "steer_return_per_s",
     "steer_gain", "steer_damping", "steer_ff_gain", "comfort_decel", "max_decel",
     "curve_lat_accel", "throttle_kp", "throttle_ff", "brake_kp", "turn_right_radius_m",
-    "turn_left_radius_m", "turn_speed_kph",
+    "turn_left_radius_m", "turn_speed_kph", "steer_softness", "max_lat_accel", "jerk_limit",
 }
 
 
