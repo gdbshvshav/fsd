@@ -519,6 +519,8 @@ class App:
         if getattr(self.capture, "error", ""):
             self.learner.say(self.capture.error)
         threading.Thread(target=self.control_loop, name="control", daemon=True).start()
+        self._t_started = time.perf_counter()
+        threading.Thread(target=self._health_later, name="health", daemon=True).start()
         st = self.perception.status()
         ocr = self.perception.ocr.engine.kind if self.perception.ocr else ""
         self.learner.say("Vision: lanes, lights, stop signs, obstacles and your car outline run without AI "
@@ -530,6 +532,26 @@ class App:
             ("Gemini", "on" if self.learner.gemini.ok else "off", True),
             ("Groq", "on" if self.learner.groq.ok else "off", True),
             ("Mode", "dry run" if self.dry_run else "live", True)])
+
+    def run_health(self) -> None:
+        """Plain-words check of everything FSD needs (also on H in the dashboard)."""
+        from .health import check
+        snap = self.snapshot()
+        rep = check(snap.status if snap else {}, snap.world if snap else None, self.fps,
+                    time.perf_counter() - self._t_started)
+        for line in rep.lines:
+            self.learner.say(line)
+        discord().embed("Health check: all good" if rep.ok else "Health check: needs attention",
+                        "\n".join(rep.lines)[:1800], BLUE if rep.ok else ORANGE)
+
+    def _health_later(self) -> None:
+        for wait in (15.0, 60.0):
+            if self._stop.wait(wait if wait == 15.0 else wait - 15.0):
+                return
+            try:
+                self.run_health()
+            except Exception as e:  # noqa: BLE001 - a report must never crash FSD
+                self.learner.say(f"health check failed: {e}")
 
     def shutdown(self) -> None:
         discord().embed("FSD closed", "", GREY)

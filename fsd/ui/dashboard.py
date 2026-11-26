@@ -274,6 +274,9 @@ class Dashboard:
             self.show_minimap = not self.show_minimap
         if ev.key == pygame.K_r:
             self.show_sides = not getattr(self, "show_sides", True)
+        if ev.key == pygame.K_h and hasattr(self.app, "run_health"):
+            import threading
+            threading.Thread(target=self.app.run_health, daemon=True).start()
         if ev.key == pygame.K_v:
             self.view = "3d" if self.view == "camera" else "camera"
             self.app.want_debug_img = self.view == "3d"
@@ -464,7 +467,7 @@ class Dashboard:
         r = st.get("min_radius_town")
         if r and r < 100:
             q += f" · turn radius {r:.0f} m"
-        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map · R sides   {st.get('fps', 0):.0f} fps{lanes}"
+        keys = (f"F1 FSD · Q/E turn · F9 hide · V view · M map · R sides · H check   {st.get('fps', 0):.0f} fps{lanes}"
                 f" · lights {st.get('lights_fps', 0):.0f}/s · v{st.get('params', 0)}{q}")
         if st.get("warn"):
             keys = st["warn"] + " · " + keys

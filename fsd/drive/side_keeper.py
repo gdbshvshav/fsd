@@ -67,7 +67,10 @@ class SideKeeper:
         else:
             self.wrong_since = None
         # no lane lines: drive by the road edges
-        if adv.target_offset is not None and lanes.conf < 0.35 and not adv.wrong_side:
+        # (only when there really are no lines - weak lines still beat edges, which can't tell
+        # a concrete barrier or a kerb from the road - and only for road widths that make sense)
+        edges_sane = edges is not None and getattr(edges, "ok", False) and 3.0 < edges.width_m < 12.0
+        if adv.target_offset is not None and lanes.conf < 0.15 and edges_sane and not adv.wrong_side:
             d.no_lines_offset = adv.target_offset
             d.reason = d.reason or adv.reason
         # after going around a stopped car (any speed): back to the right lane once it's behind us

@@ -174,6 +174,20 @@ def parse_limit(texts: list[str]) -> int | None:
     return None
 
 
+def sign_plausible(geo: Geometry, box, dist: float, lat: float, cam_to_bumper: float) -> bool:
+    """A real ER:LC stop sign stands on a post: its bottom edge is ~1-3 m above the road beside
+    it. Its distance comes from its size, so a red patch that is really far away (autumn leaves
+    on a hillside, a red roof) gets a wrong, short distance - and then its bottom edge sits
+    metres above (or below) where the road would be at that distance."""
+    try:
+        g = geo.vehicle_to_screen(np.array([[max(1.0, dist), lat]], np.float32))
+    except Exception:  # noqa: BLE001
+        return True
+    y_ground = float(g[0][1])
+    h = (y_ground - box[3]) * (dist + cam_to_bumper) / max(1.0, geo.focal_px)
+    return 0.3 < h < 4.0 and abs(lat) < 14.0
+
+
 def sign_position(geo: Geometry, box, real_h: float, cam_to_bumper: float) -> tuple[float, float]:
     x1, y1, x2, y2 = box
     d = geo.distance_from_height(max(1, y2 - y1), real_h)

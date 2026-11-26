@@ -33,7 +33,7 @@ import numpy as np
 
 from ..perception.geometry import Geometry
 from ..perception.lights import SignalTracker
-from ..perception.signs import STOP_SIGN_H_M, find_speed_sign_crops, sign_position
+from ..perception.signs import STOP_SIGN_H_M, find_speed_sign_crops, sign_plausible, sign_position
 from ..perception.tracking import EgoMotion, EmergencyDetector, Tracker
 from ..settings import Settings
 from ..perception.visual_odometry import VisualOdometry, hidden_from_box
@@ -475,6 +475,8 @@ class ParallelPerception:
                 if ob.score < p["object_min_score"]:
                     continue
                 ob.x, ob.y = sign_position(geo, ob.box, STOP_SIGN_H_M, self.cal.cam_to_bumper_m)
+                if ob.kind == "stop_sign" and not sign_plausible(geo, ob.box, ob.x, ob.y, self.cal.cam_to_bumper_m):
+                    continue                                  # red leaves / roofs: not on a post by the road
                 others.append(ob)
         others += free
         others = self.tracker.update(others, t)
