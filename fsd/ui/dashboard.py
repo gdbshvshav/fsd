@@ -243,7 +243,7 @@ class Dashboard:
                 log_error("dashboard draw")
                 self.screen.fill(BG)
             pygame.display.flip()
-            dt = self.clock.tick(60) / 1000.0
+            dt = self.clock.tick(30) / 1000.0
         self.app.shutdown()
         pygame.quit()
 

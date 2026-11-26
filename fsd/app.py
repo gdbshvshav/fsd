@@ -13,6 +13,7 @@ Threads:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -75,7 +76,8 @@ class App:
         self.store = ParamStore()
         self.store.vehicle = self.settings.vehicle
         self.dry_run = dry_run
-        self.capture = FileSource(source) if source else Capture(self.settings.monitor, self.settings.capture_fps)
+        self.capture = FileSource(source, fps=float(os.environ.get("FSD_REPLAY_FPS", "10"))) if source \
+            else Capture(self.settings.monitor, self.settings.capture_fps)
         # 60 fps, no-GPU-needed vision; YOLO only adds extra detail when a GPU is there
         self.perception = FastPerception(self.settings, on_calibrated=self.settings.save,
                                          use_detector=self._want_yolo())
@@ -222,6 +224,9 @@ class App:
             if x >= 0 and y >= 0 and x + w <= W and y + h <= H and w > 200 and h > 200:
                 frame = frame[y:y + h, x:x + w]
                 x0, y0 = x, y
+        # where our own dashboard sits inside this picture (blacked out later on the SMALL
+        # pictures - copying a 4K frame just to paint a box cost ~10 ms a frame)
+        self._ui_in_crop = None
         if self.ui_rect is not None and not isinstance(self.capture, FileSource):
             ux, uy, uw, uh = self.ui_rect
             ux, uy = ux - x0, uy - y0
@@ -229,15 +234,22 @@ class App:
             a, b = max(0, ux), max(0, uy)
             c, d = min(fw, ux + uw), min(fh, uy + uh)
             if c > a and d > b:
-                frame = frame.copy()
-                frame[b:d, a:c] = 0
+                self._ui_in_crop = (a / fw, b / fh, c / fw, d / fh)
         return frame
 
     def prep(self, frame: np.ndarray) -> FramePair:
         """Roblox area only, our window blacked out, then a ~960 px work picture
         (lanes, obstacles, car outline) and a ~1920 px one (lamps, speedometer)."""
         pair = FramePair(self.crop_game(frame), work_w=960, fine_w=1920)
+        r = getattr(self, "_ui_in_crop", None)
+        if r is not None:
+            for img in (pair.work, pair.fine):
+                if img is None:
+                    continue
+                h, w = img.shape[:2]
+                img[int(r[1] * h):int(r[3] * h), int(r[0] * w):int(r[2] * w)] = 0
         self.proc_size = (pair.work.shape[1], pair.work.shape[0])
+        self._last_work = pair.work
         return pair
 
     @staticmethod
@@ -251,14 +263,20 @@ class App:
 
     def view_frame(self, width: int, height: int) -> np.ndarray | None:
         """Newest game picture sized for the dashboard (called 60x a second by the UI)."""
-        frame, _, _ = self.capture.latest()
-        if frame is None:
-            return None
-        frame = self.crop_game(frame)
-        k = max(1, int(frame.shape[1] / width / 1.5))
-        if k > 1:
-            frame = frame[::k, ::k]              # cheap pre-shrink for 4K
-        return cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+        work = getattr(self, "_last_work", None)
+        if work is None:
+            frame, _, _ = self.capture.latest()
+            if frame is None:
+                return None
+            frame = self.crop_game(frame)
+            k = max(1, int(frame.shape[1] / width / 1.5))
+            work = frame[::k, ::k] if k > 1 else frame
+        key = (id(work), width, height)
+        if getattr(self, "_view_key", None) != key:
+            # the ~960 px picture FSD already made: no 4K resize 60 times a second
+            self._view_img = cv2.resize(work, (width, height), interpolation=cv2.INTER_LINEAR)
+            self._view_key = key
+        return self._view_img
 
     # ------------------------------------------------------------------ control loop
     def snapshot(self) -> Snapshot:

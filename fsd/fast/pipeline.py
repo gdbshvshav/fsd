@@ -138,8 +138,8 @@ class FastPerception:
         self.last_objects: list[Obj] = []
         self.last_screen: ScreenLaneResult | None = None
         self.messages: list[str] = []
-        self._bg_ego = Background(self._ego_job, "ego-outline", 0.12) if self.live else None
-        self._bg_objs = Background(self._objects_job, "lamps-signs", 0.04) if self.live else None
+        self._bg_ego = Background(self._ego_job, "ego-outline", 0.4) if self.live else None
+        self._bg_objs = Background(self._objects_job, "lamps-signs", 0.08) if self.live else None
 
     # ------------------------------------------------------------------ setup
     def _setup(self, W: int, H: int) -> None:
@@ -372,6 +372,7 @@ class FastPerception:
                 k = src.shape[1] / W
                 crops = [c for b, c in find_speed_sign_crops(src, geo.horizon_y * k) if (b[0] + b[2]) / 2 > src.shape[1] * 0.5]
             self.ocr.submit(src, crops)
+            self.ocr.fast_read(src)                    # every frame once the digits are learned
             w.speed_kph = self.ocr.speed_kph
             w.speed_valid = self.ocr.speed_valid
             w.speed_unit = self.ocr.unit

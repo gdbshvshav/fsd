@@ -168,9 +168,14 @@ class Autonomy:
         # 3) road ends ahead -> choose a turn
         if p.get("auto_route", 1.0) > 0.5 and now - self.last_choice_t > 20.0:
             cue = min(w.stop_line_dist, w.stop_sign_dist, w.crosswalk_dist)
-            if cue < 35 and (w.lanes.x_max < cue + 6 or w.lanes.conf < 0.3):
+            lights = w.signal.state.value not in ("none", "unknown")
+            if cue < 35 and not lights and w.speed_kph < 40 and (w.lanes.x_max < cue + 6 or w.lanes.conf < 0.3):
                 rb = road_beyond(frame, w)
-                if rb["straight"] < 0.25:
+                self._end_votes = getattr(self, "_end_votes", 0) + (1 if rb["straight"] < 0.12 and
+                                                                    max(rb["left"], rb["right"]) > 0.35 else -1)
+                self._end_votes = max(0, min(20, self._end_votes))
+                if self._end_votes >= 10:          # seen for a good half second, not one odd frame
+                    self._end_votes = 0
                     side = "right" if rb["right"] >= rb["left"] * 0.8 else "left"
                     turns.press(side, now)
                     turns.s.message = f"Road ends - turning {side}"

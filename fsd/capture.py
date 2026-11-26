@@ -6,6 +6,7 @@ A file/folder source is supported for replays and tests.
 from __future__ import annotations
 
 import threading
+import os
 import time
 from pathlib import Path
 
@@ -119,7 +120,7 @@ class FileSource:
         idx = tick % len(self.files) if self.loop else min(tick, len(self.files) - 1)
         if idx not in self._cache:
             img = cv2.imread(str(self.files[idx]))
-            if img is not None and img.shape[1] != 1920:
+            if img is not None and img.shape[1] != 1920 and not os.environ.get("FSD_REPLAY_NATIVE"):
                 img = cv2.resize(img, (1920, int(img.shape[0] * 1920 / img.shape[1])))
             self._cache = {idx: img}
         return self._cache[idx], time.perf_counter(), tick + 1

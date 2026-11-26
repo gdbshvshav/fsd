@@ -124,6 +124,35 @@ class OcrWorker:
         self._misses = 0
         self._last_find = 0.0
         self.status = "starting"
+        from .speedo_digits import DigitReader
+        self.digits = DigitReader()
+        self._fast_pending: float | None = None
+        self.fast_reads = 0
+
+    def fast_read(self, frame: np.ndarray) -> bool:
+        """Every frame, from the main loop: read the speedometer by digit shapes (~1 ms).
+        Returns True if it produced a fresh speed."""
+        roi = self.cal.speedo_roi
+        if roi is None or self.digits.known < 2:
+            return False
+        H, W = frame.shape[:2]
+        x1, y1, x2, y2 = int(roi[0] * W), int(roi[1] * H), int(roi[2] * W), int(roi[3] * H)
+        got = self.digits.read(frame[y1:y2, x1:x2])
+        if got is None:
+            return False
+        val, _conf = got
+        kph = val * KPH_PER_MPH if self.unit == "mph" else float(val)
+        # a sudden big jump has to be seen twice in a row
+        if self.speed_valid and abs(kph - self.speed_kph) > 40:
+            if self._fast_pending is None or abs(self._fast_pending - kph) > 8:
+                self._fast_pending = kph
+                return False
+        self._fast_pending = None
+        self.speed_kph = kph
+        self.speed_valid = True
+        self.speed_time = time.perf_counter()
+        self.fast_reads += 1
+        return True
 
     def start(self) -> "OcrWorker":
         threading.Thread(target=self._run, name="ocr", daemon=True).start()
@@ -173,7 +202,8 @@ class OcrWorker:
                 self.on_calibrated()
             roi = self.cal.speedo_roi
         x1, y1, x2, y2 = int(roi[0] * W), int(roi[1] * H), int(roi[2] * W), int(roi[3] * H)
-        items = self.engine.read(frame[y1:y2, x1:x2])
+        crop = frame[y1:y2, x1:x2]
+        items = self.engine.read(crop)
         val = None
         for text, _, score in items:
             low = text.lower()
@@ -196,6 +226,9 @@ class OcrWorker:
                 self._misses = 0
             return
         self._misses = 0
+        self.digits.learn(crop, str(int(val)))            # teach the fast digit reader
+        if self.digits.known >= 2 and time.perf_counter() - self.speed_time < 0.3:
+            return                                         # the fast reader is keeping up
         kph = val * KPH_PER_MPH if self.unit == "mph" else val
         # A single big jump is usually a misread: only accept it if the next read agrees.
         if self.speed_valid and abs(kph - self.speed_kph) > 45:
@@ -205,7 +238,7 @@ class OcrWorker:
             self._recent.clear()
         self._pending = None
         self._recent.append(kph)
-        self.speed_kph = float(np.median(self._recent))
+        self.speed_kph = float(kph)                       # newest read: no smoothing lag
         self.speed_valid = True
         self.speed_time = time.perf_counter()
 
