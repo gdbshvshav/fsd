@@ -68,3 +68,14 @@ def test_ultrawide_warm_light_recalibrates_and_sees_lines():
     assert -2.4 < ln.left.coeffs[2] < -1.0 and 0.8 < ln.right.coeffs[2] < 2.4
     assert 2.8 < ln.width_m < 4.3 and ln.conf > 0.4
     assert per.bootstrap.applied >= 1
+
+
+@pytest.mark.parametrize("name,min_conf", [("erlc_hwy_day.png", 0.8), ("erlc_hwy_night.png", 0.5)])
+def test_full_window_day_and_night_stay_locked(name, min_conf):
+    # full Roblox window from the user's PC; ~14 s so the self-calibration gets its chance and
+    # must NOT knock out lanes that are already seen well (it did: 0.91 -> 0.44)
+    w, per = run(name, 420)
+    ln = w.lanes
+    assert ln.left is not None and ln.right is not None
+    assert -2.4 < ln.left.coeffs[2] < -1.2 and 1.2 < ln.right.coeffs[2] < 2.4
+    assert ln.conf > min_conf

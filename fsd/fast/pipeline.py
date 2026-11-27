@@ -162,6 +162,49 @@ class FastPerception:
         self.home = EgoHome(self.ego_home, W, H)
         self.ego_shape = EgoShape()
 
+    def _self_calibrate(self, res, W: int, H: int, rear, t: float):
+        """Camera self-calibration with two safety rules:
+          * while the lanes are seen well, the calibration is left alone (an automatic 'fine-tune'
+            on a working camera once moved the horizon and lost the right line: 0.91 -> 0.44)
+          * every change is on trial: if the lanes are seen worse 2 s later, it's undone and
+            self-calibration rests for a minute.
+        Returns (fields to apply or None, message)."""
+        from collections import deque
+        hist = self.__dict__.setdefault("_conf_hist", deque(maxlen=240))
+        hist.append((t, float(res.lanes.conf)))
+
+        def mean(a, b):
+            v = [c for tt, c in hist if a <= tt <= b]
+            return sum(v) / len(v) if v else 0.0
+        trial = getattr(self, "_cal_trial", None)
+        if trial is not None:
+            t0, old, before = trial
+            if t - t0 >= 2.0:
+                self._cal_trial = None
+                after = mean(t0 + 0.6, t)
+                if after < before - 0.12:
+                    self.autocal.last_apply = t + 60.0
+                    self.bootstrap.last_apply = t + 60.0
+                    return dict(old), (f"Undid the automatic camera change - lanes were seen worse with it "
+                                       f"({before:.2f} -> {after:.2f}).")
+            return None, ""
+        recent = mean(t - 2.0, t)
+        fields, msg = None, ""
+        if recent < 0.6:                          # only when the lanes are NOT already seen well
+            fields = self.autocal.add(res.ego_pair_screen, W, H, rear, t)
+            msg = self.autocal.message
+        else:
+            self.autocal.add(None, W, H, rear, t)
+        if not fields and res.masks is not None:
+            fields = self.bootstrap.add(res.masks.paint | res.masks.yellow, self.ego_box, self.geo.horizon_y,
+                                        W, H, res.lanes.conf, rear, t)
+            msg = self.bootstrap.message
+        if fields:
+            old = {k: (list(map(list, v)) if k == "src_quad" else (list(v) if isinstance(v, (list, tuple)) else v))
+                   for k, v in ((k, getattr(self.cal, k)) for k in fields)}
+            self._cal_trial = (t, old, recent)
+        return fields, msg
+
     def _rebuild_geometry(self, W: int, H: int) -> None:
         """New calibration: keep trackers/ego, rebuild everything geometric."""
         self.geo = Geometry.build(self.cal, W, H)
@@ -293,12 +336,7 @@ class FastPerception:
 
         # ---- self-calibration ----
         rear = (self.ego_shape.bbox[3] / H) if self.ego_shape.bbox else None
-        fields = self.autocal.add(res.ego_pair_screen, W, H, rear, t)
-        msg = self.autocal.message
-        if not fields and res.masks is not None:
-            fields = self.bootstrap.add(res.masks.paint | res.masks.yellow, self.ego_box, self.geo.horizon_y,
-                                        W, H, res.lanes.conf, rear, t)
-            msg = self.bootstrap.message
+        fields, msg = self._self_calibrate(res, W, H, rear, t)
         if fields:
             for k, v in fields.items():
                 setattr(self.cal, k, v)
@@ -434,12 +472,7 @@ class FastPerception:
             ego_mask = box_mask(self.ego_box, H, W)
         frame = self._brighten(frame, W, H)
         res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
-        cal_fields = self.autocal.add(res.ego_pair_screen, W, H, ego_rear, t)
-        cal_msg = self.autocal.message
-        if not cal_fields and res.masks is not None:
-            cal_fields = self.bootstrap.add(res.masks.paint | res.masks.yellow, self.ego_box, self.geo.horizon_y,
-                                            W, H, res.lanes.conf, ego_rear, t)
-            cal_msg = self.bootstrap.message
+        cal_fields, cal_msg = self._self_calibrate(res, W, H, ego_rear, t)
         if cal_fields:
             for k, v in cal_fields.items():
                 setattr(self.cal, k, v)
