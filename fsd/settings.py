@@ -59,6 +59,18 @@ class Calibration:
     speedo_roi: list | None = None
     speed_unit: str = "auto"   # "auto" | "kph" | "mph"
 
+    # ---- fractions -> pixels. A window of another shape or zoom is handled by re-measuring the
+    # camera from the road (fast/autocal.py Bootstrap), which stores fractions of THAT window ----
+    def x_px(self, fx: float, W: int, H: int) -> float:
+        return fx * W
+
+    def quad_px(self, W: int, H: int) -> list:
+        return [[self.x_px(x, W, H), y * H] for x, y in self.src_quad]
+
+    def ego_px(self, W: int, H: int) -> tuple:
+        x1, y1, x2, y2 = self.ego_mask
+        return (int(self.x_px(x1, W, H)), int(y1 * H), int(self.x_px(x2, W, H)), int(y2 * H))
+
 
 def quad_problem(quad) -> str:
     """'' when the calibration trapezoid (fractions of the screen) makes sense, else what's wrong."""

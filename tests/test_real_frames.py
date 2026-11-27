@@ -58,3 +58,13 @@ def test_dev_view_renders():
     img = cv2.imread(str(DATA / "erlc_town.png"))
     out = render(img, w, per, None, {"fps": 10.0}, out_w=640)
     assert out.shape[1] == 640 and out.shape[0] > 300
+
+
+def test_ultrawide_warm_light_recalibrates_and_sees_lines():
+    # 3495x1651 window, sunset-tinted asphalt, zoomed-out camera: saw nothing before
+    w, per = run("erlc_ultrawide.png", 90)
+    ln = w.lanes
+    assert ln.left is not None and ln.right is not None
+    assert -2.4 < ln.left.coeffs[2] < -1.0 and 0.8 < ln.right.coeffs[2] < 2.4
+    assert 2.8 < ln.width_m < 4.3 and ln.conf > 0.4
+    assert per.bootstrap.applied >= 1

@@ -105,7 +105,7 @@ def render(work: np.ndarray, w, per, plan=None, info: dict | None = None, out_w:
     bad = ""
     if cal is not None:
         bad = quad_problem(cal.src_quad)
-        q = (np.array(cal.src_quad, np.float32) * [out_w, out_h]).astype(np.int32)
+        q = (np.array(cal.quad_px(W0, H0), np.float32) * s).astype(np.int32)
         cv2.polylines(out, [q.reshape(-1, 1, 2)], True, (40, 40, 255) if bad else (60, 230, 60), th, cv2.LINE_AA)
     if geo is not None:
         hy = geo.horizon_y * s

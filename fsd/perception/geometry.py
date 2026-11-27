@@ -32,7 +32,7 @@ class Geometry:
     def build(cls, cal: Calibration, W: int, H: int, bev_w: int = 400, lateral_m: float = 20.0,
               depth_m: float = 60.0) -> "Geometry":
         """BEV covers `lateral_m` across (centred) and `depth_m` ahead of the trapezoid bottom."""
-        q = np.array(cal.src_quad, dtype=np.float32) * np.array([W, H], dtype=np.float32)
+        q = np.array(cal.quad_px(W, H), dtype=np.float32)
         mpx = lateral_m / bev_w
         bev_h = int(round(depth_m / mpx))
         cx = bev_w / 2

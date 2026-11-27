@@ -63,10 +63,40 @@ class PaintFinder:
                                cv2.getStructuringElement(cv2.MORPH_RECT, (k * 6 | 1, max(3, k * 2) | 1)),
                                max(1, int(k * 0.9))))
 
+    # ------------------------------------------------------------------ white balance
+    gains = None                    # per-channel (B, G, R) gain that makes the road neutral grey
+
+    def balance(self, roi: np.ndarray) -> np.ndarray:
+        """ER:LC's sun, time of day and colour grading tint everything: at sunset the asphalt is
+        orange-brown (saturation 65) and the white paint cream, and the fixed 'grey road / white
+        paint' colour tests found nothing at all. Measure the road's own colour every frame (the
+        lower middle of the picture, where the road is) and scale the channels so the road comes
+        out neutral grey - then every test works the same in any light."""
+        h, w = roi.shape[:2]
+        a, b = int(h * 0.35), h
+        c, d = int(w * 0.22), int(w * 0.78)
+        samp = roi[a:b:3, c:d:3].reshape(-1, 3).astype(np.float32)
+        if samp.shape[0] < 50:
+            return roi
+        mx, mn = samp.max(1), samp.min(1)
+        v = mx
+        sat = (mx - mn) / np.maximum(mx, 1.0)
+        # road-like: not too dark/bright, only mildly coloured (grass, sky, paint, cars drop out)
+        k = (v > 35) & (v < 235) & (sat < 0.45)
+        if k.sum() < 50:
+            return roi
+        med = np.median(samp[k], axis=0)
+        grey = float(med.mean())
+        g = np.clip(grey / np.maximum(med, 1.0), 0.75, 1.35)
+        self.gains = g if self.gains is None else 0.8 * self.gains + 0.2 * g
+        if np.abs(self.gains - 1.0).max() < 0.1:
+            return roi                     # road already near grey: leave the picture alone
+        return cv2.convertScaleAbs(roi.astype(np.float32) * self.gains[None, None, :])
+
     def find(self, frame: np.ndarray, ego_mask: np.ndarray | None = None) -> PaintMasks:
         H, W = frame.shape[:2]
         y0 = self.y0
-        roi = frame[y0:]
+        roi = self.balance(frame[y0:])
         hls = cv2.cvtColor(roi, cv2.COLOR_BGR2HLS)
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         L, Sl = hls[:, :, 1], hls[:, :, 2]
@@ -91,6 +121,13 @@ class PaintFinder:
             local = cv2.subtract(Lb, cv2.morphologyEx(Lb, cv2.MORPH_OPEN, k_bg))
             thr = 22 if k > 6 else 18
             thin_white = (th > thr) & (local > thr) & whiteish[a:b]
+            # rough asphalt has bright stones that pass every brightness test (sometimes brighter
+            # than the paint). They're dots; paint is a solid stroke: an opening sized to the
+            # distance keeps strokes and drops dots.
+            o = max(1, k // 7)
+            if o >= 2:
+                thin_white = cv2.morphologyEx(thin_white.astype(np.uint8), cv2.MORPH_OPEN,
+                                              np.ones((o, o), np.uint8)) > 0
             Vb = V[a:b]
             thv = cv2.morphologyEx(Vb, cv2.MORPH_TOPHAT, k_line)
             thin_yel = yellow_c[a:b] & (thv > thr * 0.6)

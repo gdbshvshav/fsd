@@ -126,6 +126,8 @@ class FastPerception:
         self.ego_shape = EgoShape()
         self.ego_box: tuple[int, int, int, int] = (0, 0, 0, 0)
         self.autocal = AutoCalibrator(self.cal)
+        from .autocal import Bootstrap
+        self.bootstrap = Bootstrap(self.cal)
         self.detector = None
         if use_detector:
             try:
@@ -154,8 +156,7 @@ class FastPerception:
         self.screen = ScreenLaneFinder(self.geo)
         self.signals = SignalTracker(self.geo, self.cal.cam_to_bumper_m)
         self.motion = EgoMotion(self.geo.focal_px)
-        x1, y1, x2, y2 = self.cal.ego_mask
-        self.ego_box = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
+        self.ego_box = self.cal.ego_px(W, H)
         self.ego_home = self.ego_box            # where the car normally sits; the outline may not wander off
         from ..perception.ego_shape import EgoHome
         self.home = EgoHome(self.ego_home, W, H)
@@ -164,6 +165,11 @@ class FastPerception:
     def _rebuild_geometry(self, W: int, H: int) -> None:
         """New calibration: keep trackers/ego, rebuild everything geometric."""
         self.geo = Geometry.build(self.cal, W, H)
+        if getattr(self, "home", None) is not None and not self.home.moved:
+            # the car box comes with the calibration (re-expressed for this window shape)
+            from ..perception.ego_shape import EgoHome
+            self.ego_home = self.ego_box = self.cal.ego_px(W, H)
+            self.home = EgoHome(self.ego_home, W, H)
         self.screen.set_geometry(self.geo)
         self.signals = SignalTracker(self.geo, self.cal.cam_to_bumper_m)
         self.motion = EgoMotion(self.geo.focal_px)
@@ -288,11 +294,16 @@ class FastPerception:
         # ---- self-calibration ----
         rear = (self.ego_shape.bbox[3] / H) if self.ego_shape.bbox else None
         fields = self.autocal.add(res.ego_pair_screen, W, H, rear, t)
+        msg = self.autocal.message
+        if not fields and res.masks is not None:
+            fields = self.bootstrap.add(res.masks.paint | res.masks.yellow, self.ego_box, self.geo.horizon_y,
+                                        W, H, res.lanes.conf, rear, t)
+            msg = self.bootstrap.message
         if fields:
             for k, v in fields.items():
                 setattr(self.cal, k, v)
             self._rebuild_geometry(W, H)
-            self.messages.append(self.autocal.message)
+            self.messages.append(msg)
             if self.on_calibrated:
                 try:
                     self.on_calibrated()
@@ -424,6 +435,11 @@ class FastPerception:
         frame = self._brighten(frame, W, H)
         res = self.screen.process(frame, ego_mask, p["lane_smoothing"], p["lane_width_m"], t)
         cal_fields = self.autocal.add(res.ego_pair_screen, W, H, ego_rear, t)
+        cal_msg = self.autocal.message
+        if not cal_fields and res.masks is not None:
+            cal_fields = self.bootstrap.add(res.masks.paint | res.masks.yellow, self.ego_box, self.geo.horizon_y,
+                                            W, H, res.lanes.conf, ego_rear, t)
+            cal_msg = self.bootstrap.message
         if cal_fields:
             for k, v in cal_fields.items():
                 setattr(self.cal, k, v)
@@ -441,7 +457,7 @@ class FastPerception:
             "night_gain": self.exposure.gain,
             "clear_to": self.obstacles.clear_to, "hidden_to": self.obstacles.hidden_to,
             "vp_x": self.screen.vp_x, "ego_pair": res.ego_pair_screen,
-            "cal": dict(cal_fields) if cal_fields else None, "cal_msg": self.autocal.message if cal_fields else "",
+            "cal": dict(cal_fields) if cal_fields else None, "cal_msg": cal_msg if cal_fields else "",
             "timings": {**{k: v for k, v in res.timings.items()}, "lanes_total": time.perf_counter() - t_start},
         }
 

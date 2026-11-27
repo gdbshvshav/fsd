@@ -169,3 +169,88 @@ def from_lines(L: np.ndarray, R: np.ndarray, W: int, H: int, cal: Calibration,
 def apply(cal: Calibration, fields: dict) -> None:
     for k, v in fields.items():
         setattr(cal, k, v)
+
+
+def lane_pair_from_mask(paint: np.ndarray, car_box, horizon_hint: float | None = None):
+    """Screen-only: the two lines of the lane the car is in, from a paint mask (0/255).
+    Needs no calibration at all - used to calibrate from scratch when the current one is so
+    far off that no lanes are found (another camera zoom, angle or window shape).
+
+    car_box: (x1, y1, x2, y2) pixels of our car. Returns ((la, lb), (ra, rb)) with x = a*y + b,
+    or None."""
+    H, W = paint.shape[:2]
+    m = paint.copy()
+    x1, y1, x2, y2 = (int(v) for v in car_box)
+    m[max(0, y1):y2, max(0, x1):x2] = 0
+    top = int(H * 0.3) if horizon_hint is None else int(max(0, horizon_hint + 4))
+    m[:top] = 0
+    lines = cv2.HoughLinesP(m, 1, np.pi / 180, threshold=max(12, H // 30), minLineLength=int(H * 0.05),
+                            maxLineGap=int(H * 0.08))
+    if lines is None:
+        return None
+    segs = []
+    for xa, ya, xb, yb in lines.reshape(-1, 4).astype(np.float64):
+        if abs(yb - ya) < 6:
+            continue
+        a = (xb - xa) / (yb - ya)
+        if abs(a) < 0.12 or abs(a) > 8:
+            continue
+        segs.append((a, xa - a * ya, math.hypot(xb - xa, yb - ya)))
+    if len(segs) < 2:
+        return None
+    A = np.array([[1.0, -a] for a, _, _ in segs])
+    bv = np.array([b for _, b, _ in segs])
+    wv = np.array([ln for _, _, ln in segs])
+    # vanishing point by vote: every pair of the longest segments proposes a crossing point; the
+    # one that the most segment length passes through wins (rocks, grass and kerbs give many short
+    # segments that point anywhere - an average was dragged off by them)
+    order = np.argsort(-wv)[:24]
+    tol = max(3.0, W * 0.012)
+    best, best_sup = None, 0.0
+    for i in range(len(order)):
+        for j in range(i + 1, len(order)):
+            ai, bi = segs[order[i]][0], segs[order[i]][1]
+            aj, bj = segs[order[j]][0], segs[order[j]][1]
+            if abs(ai - aj) < 0.05:
+                continue
+            y_ = (bj - bi) / (ai - aj)
+            x_ = ai * y_ + bi
+            if not (0.1 * H < y_ < 0.6 * H and 0.2 * W < x_ < 0.8 * W):
+                continue
+            res = np.abs(A @ np.array([x_, y_]) - bv) / np.sqrt(1 + A[:, 1] ** 2)
+            sup = float(wv[res < tol].sum())
+            if sup > best_sup:
+                best, best_sup = (x_, y_), sup
+    if best is None or best_sup < H * 0.4:
+        return None
+    keep = (np.abs(A @ np.array(best) - bv) / np.sqrt(1 + A[:, 1] ** 2)) < tol
+    sw = np.sqrt(wv[keep])
+    vp, *_ = np.linalg.lstsq(A[keep] * sw[:, None], bv[keep] * sw, rcond=None)
+    x0, y0 = vp
+    # each line through the VP, by where it crosses the row of the car's rear
+    yr = float(y2)
+    cx = (x1 + x2) / 2.0
+    cand = []
+    for (a, b, ln), k in zip(segs, keep):
+        if not k:
+            continue
+        x_at = a * yr + b
+        a2 = (x_at - x0) / (yr - y0) if abs(yr - y0) > 1 else a
+        cand.append((x_at - cx, a2, x_at - a2 * yr, ln))
+    lefts = [c for c in cand if c[0] < -(x2 - x1) * 0.35]
+    rights = [c for c in cand if c[0] > (x2 - x1) * 0.35]
+    if not lefts or not rights:
+        return None
+
+    def pick(cs, sign):
+        cs.sort(key=lambda r: abs(r[0]))
+        d0 = abs(cs[0][0])
+        grp = [r for r in cs if abs(r[0]) < d0 + W * 0.02]
+        ws = sum(r[3] for r in grp)
+        return (sum(r[1] * r[3] for r in grp) / ws, sum(r[2] * r[3] for r in grp) / ws)
+    L, R = pick(lefts, -1), pick(rights, 1)
+    # a lane is wider than the car and not absurdly wide at the car's rear
+    w_rear = (R[0] * yr + R[1]) - (L[0] * yr + L[1])
+    if not ((x2 - x1) * 1.1 < w_rear < (x2 - x1) * 4.5):
+        return None
+    return L, R

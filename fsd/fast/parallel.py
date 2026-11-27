@@ -107,6 +107,8 @@ def _worker_main(role: str, settings: Settings, ring_spec: tuple, jobs: mp.Queue
             work = np.array(ring.work[slot])       # private copy: the slot may be reused
             fine = np.array(ring.fine[slot]) if ring.fine is not None else None
             if role == "lanes":
+                if extra.get("ego_box") is not None:
+                    per.ego_box = tuple(extra["ego_box"])
                 r = per.lanes_job(work, p, t, ego_mask, extra.get("ego_rear"))
             else:
                 if extra.get("ego_box") is not None:
@@ -272,8 +274,7 @@ class ParallelPerception:
         self.geo = Geometry.build(self.cal, W, H)
         self.signals = SignalTracker(self.geo, self.cal.cam_to_bumper_m)
         self.motion = EgoMotion(self.geo.focal_px)
-        x1, y1, x2, y2 = self.cal.ego_mask
-        self.ego_home = (int(x1 * W), int(y1 * H), int(x2 * W), int(y2 * H))
+        self.ego_home = self.cal.ego_px(W, H)
         self.ego_box = self.ego_home
         from ..perception.ego_shape import EgoHome
         old_home = getattr(self, "home", None)
@@ -381,7 +382,7 @@ class ParallelPerception:
             i = (self.next_lane + k) % self.n_lanes
             if self.busy_lane[i] is False:
                 self.busy_lane[i] = self.seq
-                self.lane_q[i].put(("job", self.slot, self.seq, t, p, {"ego_rear": rear}))
+                self.lane_q[i].put(("job", self.slot, self.seq, t, p, {"ego_rear": rear, "ego_box": self.ego_box}))
                 self.next_lane = (i + 1) % self.n_lanes
                 break
         if want_obj:
