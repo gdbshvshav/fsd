@@ -111,6 +111,7 @@ class Settings:
     # "auto" = virtual Xbox controller when its driver is installed (smooth analog steering and
     # pedals), otherwise W/A/S/D. "controller" / "keyboard" to force one.
     input_mode: str = "auto"
+    cal_version: int = 0            # bumped when a saved camera calibration must be reset once"
     ui_monitor: int = 1             # dashboard fills this monitor if you have 2 screens
     ui_overlay: bool = False        # True = always use the small floating window, even with 2 screens
     ui_on_top: bool = True          # stay above Roblox
@@ -153,6 +154,15 @@ class Settings:
                         setattr(s.calibration, k, v)
             except (json.JSONDecodeError, OSError):
                 pass
+        # one-time reset (v2): earlier versions' automatic fine-tune could save a calibration that
+        # lost the lane lines on the user's highway; the defaults see them at 0.91
+        if getattr(s, "cal_version", 0) < 2:
+            fresh = Calibration()
+            for k in ("width", "height", "src_quad", "quad_width_m", "quad_depth_m", "bumper_to_quad_m",
+                      "cam_to_bumper_m", "ego_mask"):
+                setattr(s.calibration, k, getattr(fresh, k))
+            s.cal_version = 2
+            s.calibration_reset = "reset once after an update"
         # a broken camera calibration (crossed / upside-down trapezoid, ego box off the car) makes
         # every lane line land in the wrong place: start from the measured defaults instead
         bad = quad_problem(s.calibration.src_quad)
